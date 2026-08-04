@@ -144,17 +144,48 @@ It auto-detects the real SSH port(s) from `sshd_config` (22 is always kept
 open regardless), shows you exactly what it's about to allow, and requires
 typing `yes` before touching anything.
 
-Then, in the GitHub settings of **both** app repos, add these secrets:
+`/home/deploy/.ssh/authorized_keys` starts **empty** — bootstrap never adds
+anyone's key to it automatically, so `ssh deploy@<vps>` will refuse every
+connection until you put something there. It needs two different keys added
+as root, each on its own line (`sudo -u deploy nano /home/deploy/.ssh/authorized_keys`):
 
-| Secret | Value |
-|---|---|
-| `VPS_HOST` | Server IP or hostname |
-| `VPS_USER` | `deploy` |
-| `VPS_SSH_KEY` | Private half of a passphrase-protected deploy key |
-| `VPS_SSH_KEY_PASSPHRASE` | That key's passphrase |
+- **A key dedicated to CI.** Generate one (don't reuse a personal key):
+  ```bash
+  ssh-keygen -t ed25519 -C psc-archiver-ci -f ci-deploy-key
+  ```
+  Paste `ci-deploy-key.pub`'s contents into `authorized_keys`, then, in the
+  GitHub settings of **both** app repos, add these secrets:
 
-No registry credentials are needed — GHCR authenticates with the built-in
-`GITHUB_TOKEN`.
+  | Secret | Value |
+  |---|---|
+  | `VPS_HOST` | Server IP or hostname |
+  | `VPS_USER` | `deploy` |
+  | `VPS_SSH_KEY` | Contents of `ci-deploy-key` (the private half) |
+  | `VPS_SSH_KEY_PASSPHRASE` | The passphrase you set above |
+
+- **Your own personal public key**, if you want `ssh deploy@<vps>` to work
+  for *you* too — several commands below (rotating a secret, logging in to
+  GHCR) assume it does. Skip this and substitute
+  `sudo -u deploy bash -c '...'` from a root session instead if you'd rather
+  never grant yourself direct login as `deploy`.
+
+That covers the **push**: CI authenticates to GHCR with the built-in
+`GITHUB_TOKEN`, no secret to add. It does not cover the **pull** — both GHCR
+packages are private (they inherit that from the source repos), and the VPS
+has no access to `GITHUB_TOKEN`, so it needs its own one-time login before
+the first deploy:
+
+```bash
+ssh deploy@<vps>
+# Generate at github.com/settings/tokens — classic PAT, scope: read:packages
+echo "<PAT>" | docker login ghcr.io -u <your-github-username> --password-stdin
+```
+
+One-time only: Docker persists this to `~/.docker/config.json` for the
+`deploy` user, so every later `docker compose pull` — CI-triggered or by
+hand — authenticates automatically from here on. Skip this entirely by
+making the two GHCR packages public instead (repo → Packages → package →
+Package settings → visibility) if you'd rather not manage this credential.
 
 ---
 
@@ -170,6 +201,21 @@ cd /opt/psc-archiver
 ./scripts/deploy.sh api a1b2c3d
 ./scripts/deploy.sh web a1b2c3d
 ```
+
+**Exception: the very first deploy on a brand-new server.** Step 5 below
+polls `/api/readyz` *through the `web` container's nginx proxy* — which
+needs **both** containers already running. On a server where neither has
+ever been started, deploying one alone with `deploy.sh` will always time out
+waiting for the other one, regardless of which you pick first. Bring both up
+together, once, instead (after `API_TAG`/`WEB_TAG` in `.env` point at real
+published tags):
+
+```bash
+docker compose -f compose.prod.yml -p psc-archiver up -d
+```
+
+Every deploy after that — from CI or by hand — can go through `deploy.sh`
+normally, since from then on the other container is always already up.
 
 `deploy.sh` will:
 
@@ -235,13 +281,33 @@ papers and questions) is then imported by signing in and calling
 
 ## Troubleshooting
 
+**`Error error from registry: unauthorized` while pulling the image.** The
+VPS hasn't logged in to GHCR yet — see "Let the server pull private images"
+under *Set up a server*. Confirm it's this and not a tag that never got
+pushed: `docker pull <image>:<tag>` on the server as `deploy` reproduces the
+same error; a 401 `unauthorized` (rather than 404 `not found`) points at
+auth. After `docker login ghcr.io`, retry the pull, then re-run the deploy.
+
+**`docker login` succeeds but pulling still fails with `denied`.** Different
+error from the one above — `unauthorized` (401) means bad/missing
+credentials; `denied` (403) means the credentials are valid but lack
+permission. `docker login` only checks that the PAT is real, not that it has
+the right scope, so this combination is the classic sign of a PAT missing
+the `read:packages` scope. Check what scopes a token actually has without
+regenerating it: `curl -sSI -H "Authorization: token <PAT>" https://api.github.com/user | grep -i x-oauth-scopes`.
+Fix: generate a **classic** PAT (not fine-grained) at
+github.com/settings/tokens with `read:packages` checked, and log in again.
+
 **Deploy failed at "Checking environment".** The output lists the missing keys.
 Add them to `/opt/psc-archiver/.env`. Nothing was changed — the running stack is
 untouched.
 
 **Deploy failed at "Waiting for the app to respond".** The new image is running
 but not serving. The last 40 log lines are printed above the failure. Roll back
-with the command the script prints, then investigate.
+with the command the script prints, then investigate. **If this is the very
+first deploy on this server**, this is expected rather than a real failure —
+see the callout under *Deploy* above: bring both containers up together once
+with plain `docker compose up -d` before using `deploy.sh` for the first time.
 
 **The API container restarts in a loop.** Almost always a missing or malformed
 env var — the app deliberately refuses to boot without `MONGODB_URI` and

@@ -9,11 +9,15 @@
 #
 # Afterwards you still have to, by hand:
 #   1. fill in /opt/psc-archiver/.env          (copied from .env.example)
-#   2. add the CI public key to ~deploy/.ssh/authorized_keys
+#   2. add a CI deploy key AND your own key to ~deploy/.ssh/authorized_keys
+#      (it starts empty — see the "Remaining steps" this script prints)
 #   3. point APP_HOST's DNS A record at this server
 #   4. bring up Traefik (printed at the end)
 #   5. optionally lock down the firewall — scripts/configure-firewall.sh,
 #      run separately and deliberately (see that script's own header)
+#   6. log the 'deploy' user in to GHCR (`docker login ghcr.io`) — both
+#      images are private, so deploys fail with "unauthorized" until this
+#      is done once; see README.md's "Set up a server" section
 #
 # This script does NOT install Docker and does NOT touch the firewall — both
 # are the operator's call, not something to do unattended from a curled
@@ -112,9 +116,16 @@ Remaining steps:
        sudo -u $DEPLOY_USER nano $DEPLOY_DIR/.env
      At minimum: APP_HOST, MONGODB_URI, JWT_SECRET, OPENAI_API_KEY.
 
-  2. Authorise CI to deploy — paste the public half of the key stored in the
-     VPS_SSH_KEY GitHub secret:
+  2. This file starts EMPTY — nothing can log in as '$DEPLOY_USER' as yet,
+     which is expected, not a bug. Add, each on its own line:
        sudo -u $DEPLOY_USER nano /home/$DEPLOY_USER/.ssh/authorized_keys
+       a) the public half of a dedicated key for CI (paste the private half
+          + its passphrase into the VPS_SSH_KEY / VPS_SSH_KEY_PASSPHRASE
+          GitHub secrets — generate one with e.g.
+          `ssh-keygen -t ed25519 -C psc-archiver-ci -f ci-deploy-key`)
+       b) your OWN public key too, if you want `ssh $DEPLOY_USER@<host>` to
+          work for you directly (several commands in README.md assume it
+          does — e.g. rotating a secret, logging in to GHCR)
 
   3. Point the APP_HOST DNS A record at this server and let it propagate.
      Let's Encrypt cannot issue a certificate until it resolves here.
@@ -123,15 +134,25 @@ Remaining steps:
        cd $DEPLOY_DIR
        ACME_EMAIL=you@example.com docker compose -f compose.traefik.yml -p traefik up -d
 
-  5. Push to master in either app repo, or deploy an existing tag by hand:
+  5. Both GHCR images are private — log '$DEPLOY_USER' in once, as
+     '$DEPLOY_USER', or every deploy fails with "unauthorized":
+       sudo -u $DEPLOY_USER bash -c 'echo "<PAT>" | docker login ghcr.io -u <github-username> --password-stdin'
+     PAT from github.com/settings/tokens — classic, scope read:packages.
+
+  6. FIRST deploy only: deploy.sh's health check execs into the 'web'
+     container and curls /api/readyz through its nginx proxy — so it needs
+     BOTH containers already running, which isn't true yet. Bring them up
+     together once instead (after setting real API_TAG/WEB_TAG in .env):
+       docker compose -f compose.prod.yml -p psc-archiver up -d
+     Every deploy after this one — from CI or by hand — can safely use:
        ./scripts/deploy.sh api <tag>
        ./scripts/deploy.sh web <tag>
 
-  6. Create the first admin account (only once, on an empty database):
+  7. Create the first admin account (only once, on an empty database):
        docker compose -f compose.prod.yml -p psc-archiver run --rm \\
          api node dist/scripts/seed-superadmin.js
 
-  7. (Optional, recommended) Lock down the firewall to SSH/HTTP/HTTPS only.
+  8. (Optional, recommended) Lock down the firewall to SSH/HTTP/HTTPS only.
      Read the script's header first — it can end your SSH session if this
      server's SSH port isn't detected correctly:
        sudo $DEPLOY_DIR/scripts/configure-firewall.sh

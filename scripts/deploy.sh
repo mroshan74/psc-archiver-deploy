@@ -25,7 +25,10 @@ COMPOSE_FILE="$DEPLOY_DIR/compose.prod.yml"
 PROJECT_NAME="psc-archiver"
 ENV_FILE="$DEPLOY_DIR/.env"
 ENV_TEMPLATE="$DEPLOY_DIR/.env.example"
-LOCK_FILE="/tmp/psc-archiver-deploy.lock"
+# Scoped per-user: a shared filename would let whichever user (root, deploy)
+# runs this first own the file and lock the other out with "Permission
+# denied" on every subsequent run by someone else.
+LOCK_FILE="/tmp/psc-archiver-deploy-$(id -un).lock"
 
 SERVICE="${1:-}"
 TAG="${2:-}"
