@@ -114,22 +114,50 @@ Atlas, so a demo cannot damage real data.
 
 ## Set up a server
 
+Requires Docker (with the Compose plugin) to already be installed — the
+bootstrap script checks and refuses to continue otherwise rather than
+installing it for you; provisioning the platform is the operator's call, not
+the app's. See [docs.docker.com/engine/install](https://docs.docker.com/engine/install/).
+
+**This repo is private**, so getting `bootstrap-server.sh` onto a fresh
+server needs a one-time, read-only **GitHub deploy key** first — this is a
+different key from `VPS_SSH_KEY` below: this one lets the *server* pull
+*from* GitHub, the other lets *CI* SSH *into* the server.
+
 ```bash
+# 1. Generate a dedicated, passphrase-less keypair (it has to unlock itself
+#    non-interactively, since deploy.sh runs `git pull` on every future deploy)
+ssh-keygen -t ed25519 -N "" -C psc-archiver-deploy -f psc-archiver-deploy-key
+
+# 2. Add the PUBLIC half as a read-only Deploy key on this repo:
+#    GitHub → this repo → Settings → Deploy keys → Add deploy key
+#    (leave "Allow write access" unchecked)
+
+# 3. Copy the PRIVATE half to the new server
+scp psc-archiver-deploy-key root@<new-vps>:/root/.ssh/psc-archiver-deploy-key
+
+# 4. On the server: a throwaway clone using that key, just to run the script
+#    (bootstrap-server.sh then does its own permanent clone as 'deploy')
 ssh root@<new-vps>
-curl -fsSL https://raw.githubusercontent.com/mroshan74/psc-archiver-deploy/master/scripts/bootstrap-server.sh | bash
+chmod 600 /root/.ssh/psc-archiver-deploy-key
+GIT_SSH_COMMAND='ssh -i /root/.ssh/psc-archiver-deploy-key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new' \
+  git clone git@github.com:mroshan74/psc-archiver-deploy.git /root/psc-archiver-deploy-bootstrap
+bash /root/psc-archiver-deploy-bootstrap/scripts/bootstrap-server.sh
+rm -rf /root/psc-archiver-deploy-bootstrap   # scratch clone, safe to delete once bootstrap finishes
 ```
 
-Requires Docker (with the Compose plugin) to already be installed — the
-script checks and refuses to continue otherwise rather than installing it
-for you; provisioning the platform is the operator's call, not the app's.
-See [docs.docker.com/engine/install](https://docs.docker.com/engine/install/).
+Bootstrap creates the `deploy` user, installs that same deploy key for it
+(so its own clone into `/opt/psc-archiver`, and every later `git pull`
+`deploy.sh` runs over SSH as `deploy`, keep working non-interactively), and
+creates the `traefik_proxy` network. It prints the remaining manual steps
+when it finishes, and also saves them to `/opt/psc-archiver/REMAINING-STEPS.txt`
+in case your session drops before you're done — `cat` that file anytime, or
+just re-run the script; it's idempotent and safe to repeat.
 
-Given that, bootstrap creates the `deploy` user, clones this repo to
-`/opt/psc-archiver`, and creates the `traefik_proxy` network. It prints the
-remaining manual steps when it finishes, and also saves them to
-`/opt/psc-archiver/REMAINING-STEPS.txt` in case your session drops before
-you're done — `cat` that file anytime, or just re-run the script; it's
-idempotent and safe to repeat.
+If this repo is ever made public, skip all of the above — the original
+curl-pipe-bash one-liner works directly, and `REPO_URL` in
+`bootstrap-server.sh` can be overridden to an anonymous HTTPS URL to skip
+deploy-key setup entirely.
 
 **Firewall lockdown is a separate, manual step on purpose** — resetting ufw
 from inside this unattended script could end the SSH session running it.
