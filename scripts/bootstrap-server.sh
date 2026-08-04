@@ -12,13 +12,21 @@
 #   2. add the CI public key to ~deploy/.ssh/authorized_keys
 #   3. point APP_HOST's DNS A record at this server
 #   4. bring up Traefik (printed at the end)
+#   5. optionally lock down the firewall — scripts/configure-firewall.sh,
+#      run separately and deliberately (see that script's own header)
+#
+# This script does NOT install Docker and does NOT touch the firewall — both
+# are the operator's call, not something to do unattended from a curled
+# script. See the "Remaining steps" it prints at the end (also saved to
+# /opt/psc-archiver/REMAINING-STEPS.txt).
 
 set -euo pipefail
 
-BLUE='\033[0;34m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
+BLUE='\033[0;34m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; RED='\033[0;31m'; NC='\033[0m'
 step() { echo -e "${BLUE}==> $*${NC}"; }
 ok()   { echo -e "${GREEN}✓ $*${NC}"; }
 note() { echo -e "${YELLOW}$*${NC}"; }
+fail() { echo -e "${RED}✗ $*${NC}" >&2; exit 1; }
 
 DEPLOY_USER="${DEPLOY_USER:-deploy}"
 DEPLOY_DIR="/opt/psc-archiver"
@@ -27,12 +35,18 @@ REPO_URL="${REPO_URL:-https://github.com/mroshan74/psc-archiver-deploy.git}"
 [[ "$(id -u)" -eq 0 ]] || { echo "Run as root or with sudo." >&2; exit 1; }
 
 # ── Docker ─────────────────────────────────────────────────────────────────
+# This script provisions the app, not the platform: installing a container
+# runtime is the operator's call (version, storage driver, etc are theirs to
+# pick), so a missing Docker is a hard stop rather than something we install
+# for you.
+step "Checking for Docker"
 if ! command -v docker >/dev/null 2>&1; then
-  step "Installing Docker Engine"
-  curl -fsSL https://get.docker.com | sh
-else
-  ok "Docker already installed ($(docker --version))"
+  fail "Docker is not installed. Install Docker Engine (with the Compose plugin) first, then re-run this script: https://docs.docker.com/engine/install/"
 fi
+if ! docker compose version >/dev/null 2>&1; then
+  fail "Docker is installed but the Compose plugin ('docker compose') is missing. Install it, then re-run this script: https://docs.docker.com/compose/install/"
+fi
+ok "Docker already installed ($(docker --version))"
 
 # ── Deploy user ────────────────────────────────────────────────────────────
 if ! id -u "$DEPLOY_USER" >/dev/null 2>&1; then
@@ -47,21 +61,12 @@ chmod 600 "/home/$DEPLOY_USER/.ssh/authorized_keys"
 ok "User '$DEPLOY_USER' ready (member of the docker group)"
 
 # ── Firewall ───────────────────────────────────────────────────────────────
-# Only SSH and HTTP(S). Container ports stay on the internal Docker network —
-# the predecessor projects published app ports publicly, which served plain
-# HTTP straight past Traefik's TLS.
-step "Configuring the firewall"
-if ! command -v ufw >/dev/null 2>&1; then
-  apt-get update -qq && apt-get install -y -qq ufw
-fi
-ufw --force reset >/dev/null
-ufw default deny incoming >/dev/null
-ufw default allow outgoing >/dev/null
-ufw allow 22/tcp   comment 'SSH'   >/dev/null
-ufw allow 80/tcp   comment 'HTTP'  >/dev/null
-ufw allow 443/tcp  comment 'HTTPS' >/dev/null
-ufw --force enable >/dev/null
-ok "Firewall allows 22, 80, 443 only"
+# Deliberately NOT done here. Resetting ufw from inside an unattended,
+# curl-piped script can end the very SSH session running it — e.g. if this
+# server's real SSH port isn't 22, or something else inbound needs to stay
+# open. Locking it down is scripts/configure-firewall.sh, run by hand,
+# separately, after you've read its warnings. Pointed to again in the
+# "Remaining steps" below.
 
 # ── Deploy checkout ────────────────────────────────────────────────────────
 # /opt, not a personal home directory — the server layout should not depend on
@@ -92,7 +97,12 @@ if ! docker network inspect traefik_proxy >/dev/null 2>&1; then
 fi
 ok "Network traefik_proxy ready"
 
-cat <<EOF
+# A function, not an inline heredoc, so the exact same text can be written
+# both to the terminal and to a file — see below. If your session drops
+# before you're done with these, the file is how you get them back without
+# re-running the whole script.
+print_remaining_steps() {
+  cat <<EOF
 
 $(echo -e "${GREEN}Server bootstrap complete.${NC}")
 
@@ -121,4 +131,16 @@ Remaining steps:
        docker compose -f compose.prod.yml -p psc-archiver run --rm \\
          api node dist/scripts/seed-superadmin.js
 
+  7. (Optional, recommended) Lock down the firewall to SSH/HTTP/HTTPS only.
+     Read the script's header first — it can end your SSH session if this
+     server's SSH port isn't detected correctly:
+       sudo $DEPLOY_DIR/scripts/configure-firewall.sh
+
+Lost this output? It's saved at $DEPLOY_DIR/REMAINING-STEPS.txt — cat it
+anytime, or just re-run this script; it's idempotent and safe to repeat.
+
 EOF
+}
+
+print_remaining_steps | tee "$DEPLOY_DIR/REMAINING-STEPS.txt"
+chown "$DEPLOY_USER:$DEPLOY_USER" "$DEPLOY_DIR/REMAINING-STEPS.txt"

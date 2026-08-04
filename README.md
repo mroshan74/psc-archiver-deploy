@@ -57,10 +57,11 @@ container. Consequences worth knowing:
 | `compose.traefik.yml` | Edge proxy and TLS. Brought up once, then left alone |
 | `compose.local.yml` | Prod-parity local stack, with its own MongoDB |
 | `.env.example` | The key schema `deploy.sh` validates the server's `.env` against |
-| `scripts/bootstrap-server.sh` | One-time VPS setup |
+| `scripts/bootstrap-server.sh` | One-time VPS setup (Docker + firewall are **not** included — see below) |
+| `scripts/configure-firewall.sh` | Optional, manual: lock the server down to SSH/HTTP/HTTPS |
 | `scripts/deploy.sh` | What CI runs over SSH |
 | `scripts/rollback.sh` | Redeploy an older tag |
-| `scripts/seed-local.mjs` | First-run bootstrap for the local stack |
+| `scripts/seed-local.mjs` | First-run bootstrap for the local stack. Runs *inside* the `api` container (via the `seed` compose profile) — the host never needs Node.js, only Docker |
 
 ---
 
@@ -82,7 +83,10 @@ Open **http://localhost:8080** and sign in as `superadmin` / `ChangeMe123!`
 (you will be asked to set a new password). Override with
 `SEED_SUPERADMIN_USERNAME` / `SEED_SUPERADMIN_PASSWORD`.
 
-The seed step is idempotent — re-running it creates nothing twice.
+The seed step is idempotent — re-running it creates nothing twice. It runs
+`scripts/seed-local.mjs` *inside* the `api` image's own Node (via the `seed`
+profile above) — the host you run these commands on never needs Node.js
+installed, only Docker.
 
 To run an exact published build instead of your working tree:
 
@@ -115,9 +119,30 @@ ssh root@<new-vps>
 curl -fsSL https://raw.githubusercontent.com/mroshan74/psc-archiver-deploy/master/scripts/bootstrap-server.sh | bash
 ```
 
-Installs Docker, creates the `deploy` user, restricts the firewall to 22/80/443,
-clones this repo to `/opt/psc-archiver`, and creates the `traefik_proxy`
-network. It prints the remaining manual steps when it finishes.
+Requires Docker (with the Compose plugin) to already be installed — the
+script checks and refuses to continue otherwise rather than installing it
+for you; provisioning the platform is the operator's call, not the app's.
+See [docs.docker.com/engine/install](https://docs.docker.com/engine/install/).
+
+Given that, bootstrap creates the `deploy` user, clones this repo to
+`/opt/psc-archiver`, and creates the `traefik_proxy` network. It prints the
+remaining manual steps when it finishes, and also saves them to
+`/opt/psc-archiver/REMAINING-STEPS.txt` in case your session drops before
+you're done — `cat` that file anytime, or just re-run the script; it's
+idempotent and safe to repeat.
+
+**Firewall lockdown is a separate, manual step on purpose** — resetting ufw
+from inside this unattended script could end the SSH session running it.
+Once you're ready, with a way to recover if something goes wrong (provider
+console, a second session), run:
+
+```bash
+sudo /opt/psc-archiver/scripts/configure-firewall.sh
+```
+
+It auto-detects the real SSH port(s) from `sshd_config` (22 is always kept
+open regardless), shows you exactly what it's about to allow, and requires
+typing `yes` before touching anything.
 
 Then, in the GitHub settings of **both** app repos, add these secrets:
 
