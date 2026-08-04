@@ -1,0 +1,11 @@
+# The live server environment. Holds the database password, JWT secret and
+# OpenAI key — never commit it. .env.example is the tracked schema.
+.env
+.env.*
+!.env.example
+
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

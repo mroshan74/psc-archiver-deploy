@@ -1,0 +1,101 @@
+# Prod-parity local stack.
+#
+# Runs the same images, the same nginx, and the same single-origin routing as
+# production, so it doubles as the test harness for the deployment setup: if
+# the /api proxy or the seed path is broken, it breaks here rather than on a
+# server.
+#
+#   Build from your working tree:   docker compose -f compose.local.yml up -d --build
+#   Run a published build:          API_TAG=<sha> WEB_TAG=<sha> \
+#                                     API_IMAGE=ghcr.io/mroshan74/psc-archiver-api \
+#                                     WEB_IMAGE=ghcr.io/mroshan74/psc-archiver-web \
+#                                     docker compose -f compose.local.yml pull && ... up -d --no-build
+#   First-run bootstrap:            docker compose -f compose.local.yml --profile seed run --rm seed
+#
+# Then open http://localhost:8080
+#
+# This stack deliberately uses its OWN MongoDB container. The predecessor
+# project's local compose pointed at the live Atlas cluster with full
+# read/write — a demo stack must not be able to damage real data.
+
+name: psc-archiver-local
+
+x-api-env: &api-env
+  MONGODB_URI: mongodb://mongo:27017/pscarchiver
+  JWT_SECRET: local-only-not-a-real-secret
+  PORT: "5000"
+  NODE_ENV: production
+  CLIENT_URL: http://localhost:8080
+  BUILD_ID: ${BUILD_VERSION:-local}
+  # Kept on locally — it is the quickest way to poke at the API by hand.
+  SWAGGER_ENABLED: "true"
+  # Off by default so a demo stack never spends OpenAI credits.
+  AI_TAGGING_QUEUE_ENABLED: "false"
+  AI_TAGGING_OPEN_FOLDER_ENABLED: "false"
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  SEEDER_DATA_DIR: data
+  SEED_SUPERADMIN_USERNAME: ${SEED_SUPERADMIN_USERNAME:-superadmin}
+  SEED_SUPERADMIN_PASSWORD: ${SEED_SUPERADMIN_PASSWORD:-ChangeMe123!}
+
+services:
+  mongo:
+    image: mongo:8
+    restart: unless-stopped
+    # 27018 on the host so this never collides with a MongoDB you already run
+    # on the default port. Connect a GUI to mongodb://localhost:27018.
+    ports:
+      - "27018:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  api:
+    image: ${API_IMAGE:-psc-archiver-api}:${API_TAG:-local}
+    build:
+      context: ../psc-archiver-api
+      args:
+        BUILD_VERSION: ${BUILD_VERSION:-local}
+    restart: unless-stopped
+    environment: *api-env
+    # No published port: the web container reaches it over the compose network,
+    # exactly as Traefik + nginx do in production.
+    depends_on:
+      mongo:
+        condition: service_healthy
+    volumes:
+      - ai_tagging_jobs:/app/data/jobs/ai-tagging
+
+  web:
+    image: ${WEB_IMAGE:-psc-archiver-web}:${WEB_TAG:-local}
+    build:
+      context: ../psc-archiver-admin
+      args:
+        BUILD_VERSION: ${BUILD_VERSION:-local}
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      - api
+
+  # One-shot bootstrap. Idempotent — safe to re-run.
+  seed:
+    profiles: [seed]
+    image: ${API_IMAGE:-psc-archiver-api}:${API_TAG:-local}
+    environment:
+      <<: *api-env
+      API_BASE_URL: http://api:5000
+    volumes:
+      - ./scripts/seed-local.mjs:/seed-local.mjs:ro
+    command: ["node", "/seed-local.mjs"]
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+volumes:
+  mongo_data:
+  ai_tagging_jobs:

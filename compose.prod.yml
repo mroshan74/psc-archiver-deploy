@@ -1,0 +1,65 @@
+# Production stack. Deployed to /opt/psc-archiver on the VPS and driven by
+# scripts/deploy.sh — do not run `docker compose` here by hand except to
+# inspect state.
+#
+# One public hostname, one origin: Traefik terminates TLS and routes to the web
+# container, which serves the SPA and proxies /api to the api container over
+# the internal network. The api is never routed directly, so there is no CORS
+# in production and only one certificate.
+
+name: psc-archiver
+
+services:
+  api:
+    # Resolved from .env, which deploy.sh rewrites on every deploy. Never
+    # `:latest` — pinning the tag is what makes rollback a one-liner.
+    image: ${API_IMAGE:-ghcr.io/mroshan74/psc-archiver-api}:${API_TAG:?API_TAG is not set in .env}
+    container_name: psc-archiver-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    # No `ports:` on purpose. Traefik and nginx both reach this container over
+    # the shared network; publishing a host port would expose the API on the
+    # public IP over plain HTTP, bypassing TLS.
+    volumes:
+      # OpenAI batch jobs run for minutes to 24h and their artefacts must
+      # survive a restart for the result import to work.
+      - ai_tagging_jobs:/app/data/jobs/ai-tagging
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - traefik_proxy
+    labels:
+      - "traefik.enable=false"
+
+  web:
+    image: ${WEB_IMAGE:-ghcr.io/mroshan74/psc-archiver-web}:${WEB_TAG:?WEB_TAG is not set in .env}
+    container_name: psc-archiver-web
+    restart: unless-stopped
+    depends_on:
+      - api
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - traefik_proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.archiver.rule=Host(`${APP_HOST:?APP_HOST is not set in .env}`)"
+      - "traefik.http.routers.archiver.entrypoints=websecure"
+      - "traefik.http.routers.archiver.tls.certresolver=letsencrypt"
+      # Traefik can infer this from EXPOSE, but stating it removes the guess.
+      - "traefik.http.services.archiver.loadbalancer.server.port=80"
+
+volumes:
+  ai_tagging_jobs:
+    name: psc-archiver-ai-tagging-jobs
+
+networks:
+  traefik_proxy:
+    external: true

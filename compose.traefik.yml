@@ -1,0 +1,53 @@
+# Edge proxy + automatic TLS. Brought up once by scripts/bootstrap-server.sh
+# and then left alone — app deploys never touch this stack.
+#
+#   docker compose -f compose.traefik.yml -p traefik up -d
+
+name: traefik
+
+services:
+  traefik:
+    image: traefik:v3.3
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - "--api.dashboard=false"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entryPoints.web.address=:80"
+      - "--entryPoints.websecure.address=:443"
+      # Everything is HTTPS; plain HTTP only ever redirects.
+      - "--entryPoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entryPoints.web.http.redirections.entrypoint.scheme=https"
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:?ACME_EMAIL is not set}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--log.level=INFO"
+      - "--accesslog=true"
+    ports:
+      - "80:80"
+      - "443:443"
+      # No dashboard port. The predecessor published 8080 for a dashboard that
+      # `--api.insecure=false` never served.
+    volumes:
+      - letsencrypt:/letsencrypt
+      # Read-only: Traefik only needs to watch container labels.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - traefik_proxy
+
+volumes:
+  # Holds acme.json. Back this up — losing it means re-issuing certificates and
+  # risking Let's Encrypt rate limits.
+  letsencrypt:
+    name: letsencrypt
+
+networks:
+  traefik_proxy:
+    name: traefik_proxy
+    driver: bridge
