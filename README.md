@@ -126,7 +126,7 @@ The following must already be true before the application can be set up:
 | Docker Engine + the Compose plugin | `setup-app.sh` verifies, never installs |
 | An account to SSH in as, able to reach the Docker socket (typically via the `docker` group), that the developer doing setup can log in to | never created here. A dedicated service account is preferred; `root` works |
 | The CI public key installed on that account's `authorized_keys` | needed before the first CI *deploy*, not before setup. Never written here — you generate the keypair (below) and hand over the public half |
-| `/opt/psc-archiver`, owned by that account | the one thing `setup-app.sh` will create itself, with a single `sudo install -d`, if it can |
+| `/opt/psc-archiver`, owned by that account | the one thing `setup-app.sh` offers to do itself — it prints the `sudo install -d` and waits for a `y` before running it. Answer `n` and it stops, unchanged |
 | Inbound 80 and 443 reachable, and SSH reachable from GitHub Actions | never changed here |
 
 ---
@@ -155,6 +155,20 @@ saves them to `/opt/psc-archiver/REMAINING-STEPS.txt` in case your session
 drops before you're done — `cat` that file anytime, or just re-run the script;
 it's idempotent and safe to repeat.
 
+**It stops and asks twice**, and in both cases prints the exact command before
+running anything:
+
+| Prompt | If you answer `y` | If you answer `n` |
+|---|---|---|
+| Create (or hand over) `/opt/psc-archiver` — the one privileged command | runs that single `sudo` and continues | stops immediately, server unchanged, and prints the command to pass to whoever administers it |
+| Log in to ghcr.io | asks for your GitHub username and PAT (input hidden, piped straight to `--password-stdin` — never echoed, never a shell argument, never written anywhere but Docker's own config) | carries on; it stays in the printed steps for later |
+
+It skips the second prompt entirely if credentials for `ghcr.io` are already
+stored, and the printed steps reflect what is actually still outstanding — a
+login you completed does not sit there looking pending. Prompts read from
+`/dev/tty`, so they work under `curl … | bash`; with no terminal at all
+(a non-interactive run) both answer "no".
+
 **A key dedicated to CI.** Generate one (don't reuse a personal key):
 
 ```bash
@@ -176,7 +190,8 @@ That covers the **push**: CI authenticates to GHCR with the built-in
 `GITHUB_TOKEN`, no secret to add. It does not cover the **pull** — both GHCR
 packages are private (they inherit that from the source repos), and the VPS
 has no access to `GITHUB_TOKEN`, so it needs its own one-time login before
-the first deploy:
+the first deploy. `setup-app.sh` offers to do this for you; to do it by hand
+instead, or later:
 
 ```bash
 ssh <VPS_USER>@<vps>
