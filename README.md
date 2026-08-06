@@ -18,7 +18,7 @@ Fill these in — the checked-in files use placeholders.
 |---|---|---|
 | `APP_HOST` | `/opt/psc-archiver/.env` | The public hostname, e.g. `archiver.trynbuild.com` |
 | `ACME_EMAIL` | passed to `compose.traefik.yml` | Where Let's Encrypt sends expiry warnings |
-| `REPO_URL` | `scripts/bootstrap-server.sh` | This repo's clone URL, if not `mroshan74/psc-archiver-deploy` |
+| `REPO_URL` | `scripts/setup-app.sh` | This repo's clone URL, if not `mroshan74/psc-archiver-deploy` |
 | `API_IMAGE` / `WEB_IMAGE` | `.env` | GHCR paths, if the owner is not `mroshan74` |
 | `MONGODB_URI`, `JWT_SECRET`, `OPENAI_API_KEY` | `.env` | Real credentials |
 
@@ -57,8 +57,7 @@ container. Consequences worth knowing:
 | `compose.traefik.yml` | Edge proxy and TLS. Brought up once, then left alone |
 | `compose.local.yml` | Prod-parity local stack, with its own MongoDB |
 | `.env.example` | The key schema `deploy.sh` validates the server's `.env` against |
-| `scripts/bootstrap-server.sh` | One-time VPS setup (Docker + firewall are **not** included — see below) |
-| `scripts/configure-firewall.sh` | Optional, manual: lock the server down to SSH/HTTP/HTTPS |
+| `scripts/setup-app.sh` | One-time application setup on an already-provisioned server. Checks its prerequisites; provisions nothing |
 | `scripts/deploy.sh` | What CI runs over SSH |
 | `scripts/rollback.sh` | Redeploy an older tag |
 | `scripts/seed-local.mjs` | First-run bootstrap for the local stack. Runs *inside* the `api` container (via the `seed` compose profile) — the host never needs Node.js, only Docker |
@@ -112,62 +111,66 @@ Atlas, so a demo cannot damage real data.
 
 ---
 
-## Set up a server
+## Prerequisites — provisioned by whoever owns the server
+
+Server provisioning belongs to the platform team, not to an application
+deploy. **Nothing in this repo installs packages, creates users or groups,
+writes SSH keys, edits `sshd_config`, or configures the firewall.** The setup
+script checks for what it needs and stops with a specific ask when something
+is missing.
+
+The following must already be true before the application can be set up:
+
+| Requirement | Notes |
+|---|---|
+| Docker Engine + the Compose plugin | `setup-app.sh` verifies, never installs |
+| An account to SSH in as, able to reach the Docker socket (typically via the `docker` group), that the developer doing setup can log in to | never created here. A dedicated service account is preferred; `root` works |
+| The CI public key installed on that account's `authorized_keys` | needed before the first CI *deploy*, not before setup. Never written here — you generate the keypair (below) and hand over the public half |
+| `/opt/psc-archiver`, owned by that account | the one thing `setup-app.sh` will create itself, with a single `sudo install -d`, if it can |
+| Inbound 80 and 443 reachable, and SSH reachable from GitHub Actions | never changed here |
+
+---
+
+## Set up the application
+
+A one-time manual step, run by a developer after the server is handed over and
+**before the first CI deploy**. CI never runs it — CI only runs `deploy.sh`,
+which is on the server because this put it there.
 
 ```bash
-ssh root@<new-vps>
-curl -fsSL https://raw.githubusercontent.com/mroshan74/psc-archiver-deploy/master/scripts/bootstrap-server.sh | bash
+ssh <account>@<vps>
+curl -fsSL https://raw.githubusercontent.com/mroshan74/psc-archiver-deploy/master/scripts/setup-app.sh | bash
 ```
 
-Requires Docker (with the Compose plugin) to already be installed — the
-script checks and refuses to continue otherwise rather than installing it
-for you; provisioning the platform is the operator's call, not the app's.
-See [docs.docker.com/engine/install](https://docs.docker.com/engine/install/).
+**Whichever account you SSH in as is the account CI must use.** The script
+checks *that* account — not a hardcoded one — for Docker access and write
+access to `/opt/psc-archiver`, and prints it at the end as the value for the
+`VPS_USER` secret. Setting up as one account while CI connects as another is
+the classic failure: `deploy.sh`'s `git pull` and its `sed -i` on `.env` both
+need to write there, and fail with "permission denied" otherwise.
 
-Given that, bootstrap creates the `deploy` user, clones this repo to
-`/opt/psc-archiver`, and creates the `traefik_proxy` network. It prints the
-remaining manual steps when it finishes, and also saves them to
-`/opt/psc-archiver/REMAINING-STEPS.txt` in case your session drops before
-you're done — `cat` that file anytime, or just re-run the script; it's
-idempotent and safe to repeat.
+It then clones this repo to `/opt/psc-archiver` and creates `.env` from the
+template. It prints the remaining manual steps when it finishes, and also
+saves them to `/opt/psc-archiver/REMAINING-STEPS.txt` in case your session
+drops before you're done — `cat` that file anytime, or just re-run the script;
+it's idempotent and safe to repeat.
 
-**Firewall lockdown is a separate, manual step on purpose** — resetting ufw
-from inside this unattended script could end the SSH session running it.
-Once you're ready, with a way to recover if something goes wrong (provider
-console, a second session), run:
+**A key dedicated to CI.** Generate one (don't reuse a personal key):
 
 ```bash
-sudo /opt/psc-archiver/scripts/configure-firewall.sh
+ssh-keygen -t ed25519 -C psc-archiver-ci -f ci-deploy-key
 ```
 
-It auto-detects the real SSH port(s) from `sshd_config` (22 is always kept
-open regardless), shows you exactly what it's about to allow, and requires
-typing `yes` before touching anything.
+Hand `ci-deploy-key.pub` to whoever manages access on that server, to be
+installed on the account above. Then, in the GitHub settings of **both** app
+repos, add these secrets:
 
-`/home/deploy/.ssh/authorized_keys` starts **empty** — bootstrap never adds
-anyone's key to it automatically, so `ssh deploy@<vps>` will refuse every
-connection until you put something there. It needs two different keys added
-as root, each on its own line (`sudo -u deploy nano /home/deploy/.ssh/authorized_keys`):
-
-- **A key dedicated to CI.** Generate one (don't reuse a personal key):
-  ```bash
-  ssh-keygen -t ed25519 -C psc-archiver-ci -f ci-deploy-key
-  ```
-  Paste `ci-deploy-key.pub`'s contents into `authorized_keys`, then, in the
-  GitHub settings of **both** app repos, add these secrets:
-
-  | Secret | Value |
-  |---|---|
-  | `VPS_HOST` | Server IP or hostname |
-  | `VPS_USER` | `deploy` |
-  | `VPS_SSH_KEY` | Contents of `ci-deploy-key` (the private half) |
-  | `VPS_SSH_KEY_PASSPHRASE` | The passphrase you set above |
-
-- **Your own personal public key**, if you want `ssh deploy@<vps>` to work
-  for *you* too — several commands below (rotating a secret, logging in to
-  GHCR) assume it does. Skip this and substitute
-  `sudo -u deploy bash -c '...'` from a root session instead if you'd rather
-  never grant yourself direct login as `deploy`.
+| Secret | Value |
+|---|---|
+| `VPS_HOST` | Server IP or hostname |
+| `VPS_USER` | The account `setup-app.sh` ran as — it prints the exact value |
+| `VPS_SSH_KEY` | Contents of `ci-deploy-key` (the private half) |
+| `VPS_SSH_KEY_PASSPHRASE` | The passphrase you set above |
 
 That covers the **push**: CI authenticates to GHCR with the built-in
 `GITHUB_TOKEN`, no secret to add. It does not cover the **pull** — both GHCR
@@ -176,16 +179,21 @@ has no access to `GITHUB_TOKEN`, so it needs its own one-time login before
 the first deploy:
 
 ```bash
-ssh deploy@<vps>
+ssh <VPS_USER>@<vps>
 # Generate at github.com/settings/tokens — classic PAT, scope: read:packages
 echo "<PAT>" | docker login ghcr.io -u <your-github-username> --password-stdin
 ```
 
-One-time only: Docker persists this to `~/.docker/config.json` for the
-`deploy` user, so every later `docker compose pull` — CI-triggered or by
-hand — authenticates automatically from here on. Skip this entirely by
+One-time only: Docker persists this to that account's `~/.docker/config.json`,
+so every later `docker compose pull` — CI-triggered or by hand —
+authenticates automatically from here on. Skip this entirely by
 making the two GHCR packages public instead (repo → Packages → package →
 Package settings → visibility) if you'd rather not manage this credential.
+
+**Bring Traefik up before the app stack.** The `compose.traefik.yml` stack
+owns the shared `traefik_proxy` network; `compose.prod.yml` joins it as
+`external`, so starting the app stack first on a fresh server fails with
+`network traefik_proxy declared as external, but could not be found`.
 
 ---
 
@@ -254,7 +262,7 @@ roll back to is always in the previous deploy's log.
 ## Rotate a secret
 
 ```bash
-ssh deploy@<vps>
+ssh <VPS_USER>@<vps>
 cd /opt/psc-archiver
 nano .env                                  # edit the value
 ./scripts/deploy.sh api "$(sed -n 's/^API_TAG=//p' .env)"   # redeploy the same tag
@@ -282,11 +290,11 @@ papers and questions) is then imported by signing in and calling
 ## Troubleshooting
 
 **`Error error from registry: unauthorized` while pulling the image.** The
-VPS hasn't logged in to GHCR yet — see "Let the server pull private images"
-under *Set up a server*. Confirm it's this and not a tag that never got
-pushed: `docker pull <image>:<tag>` on the server as `deploy` reproduces the
-same error; a 401 `unauthorized` (rather than 404 `not found`) points at
-auth. After `docker login ghcr.io`, retry the pull, then re-run the deploy.
+VPS hasn't logged in to GHCR yet — see the `docker login` step under *Set up
+the application*. Confirm it's this and not a tag that never got pushed:
+`docker pull <image>:<tag>` on the server as `VPS_USER` reproduces the same
+error; a 401 `unauthorized` (rather than 404 `not found`) points at auth.
+After `docker login ghcr.io`, retry the pull, then re-run the deploy.
 
 **`docker login` succeeds but pulling still fails with `denied`.** Different
 error from the one above — `unauthorized` (401) means bad/missing
@@ -312,6 +320,17 @@ with plain `docker compose up -d` before using `deploy.sh` for the first time.
 **The API container restarts in a loop.** Almost always a missing or malformed
 env var — the app deliberately refuses to boot without `MONGODB_URI` and
 `JWT_SECRET`. Check `docker compose -f compose.prod.yml -p psc-archiver logs api`.
+
+**`network traefik_proxy declared as external, but could not be found`.** The
+Traefik stack hasn't been started on this server yet — it is what creates that
+network. Bring it up first
+(`ACME_EMAIL=… docker compose -f compose.traefik.yml -p traefik up -d`), then
+retry the app stack.
+
+**`permission denied` on `git pull` or `.env` during a deploy.** `VPS_USER`
+is not the account `/opt/psc-archiver` belongs to. Compare `ls -ld
+/opt/psc-archiver` with the `VPS_USER` secret; re-running `setup-app.sh` as
+the intended account prints the value it should be.
 
 **Certificate is not issued.** Traefik needs the `APP_HOST` DNS record to
 resolve to this server *before* it can complete the ACME challenge. Confirm with

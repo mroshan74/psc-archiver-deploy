@@ -7,6 +7,9 @@
 # the internal network. The api is never routed directly, so there is no CORS
 # in production and only one certificate.
 
+# docker compose -f compose.prod.yml -p psc-archiver up -d
+
+
 name: psc-archiver
 
 services:
@@ -61,5 +64,7 @@ volumes:
     name: psc-archiver-ai-tagging-jobs
 
 networks:
+  # Created and owned by the Traefik stack (compose.traefik.yml), which must
+  # therefore be up before this one. Nothing creates it imperatively.
   traefik_proxy:
     external: true

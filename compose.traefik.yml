@@ -1,10 +1,16 @@
-# Edge proxy + automatic TLS. bootstrap-server.sh only creates the
-# traefik_proxy network this stack and the app stack (compose.prod.yml) share
-# — starting Traefik itself is a deliberate manual step (it needs ACME_EMAIL,
-# which bootstrap has no way to ask for non-interactively), run once and then
-# left alone; app deploys never touch this stack.
+# Edge proxy + automatic TLS. This stack OWNS the traefik_proxy network that it
+# and the app stack (compose.prod.yml) share — the network block below is not
+# `external`, so bringing this up is what creates it. compose.prod.yml joins the
+# same network as `external`, which is why Traefik has to come up first on a
+# fresh server. Starting it is a deliberate manual step (it needs ACME_EMAIL,
+# which nothing can ask for non-interactively), run once and then left alone;
+# app deploys never touch this stack.
 #
 #   ACME_EMAIL=you@example.com docker compose -f compose.traefik.yml -p traefik up -d
+#
+# Because this stack owns the network, `down` here also removes it. Docker
+# refuses while the app containers are still attached, which is the safe
+# outcome — but stop the app stack first if you really mean to tear this down.
 
 name: traefik
 
