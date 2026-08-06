@@ -28,6 +28,17 @@ services:
       # OpenAI batch jobs run for minutes to 24h and their artefacts must
       # survive a restart for the result import to work.
       - ai_tagging_jobs:/app/data/jobs/ai-tagging
+    healthcheck:
+      # readyz, not healthz: a process that is up but cannot reach Mongo is not
+      # a deploy that worked. Alpine ships BusyBox wget, which exits non-zero on
+      # the 503 readyz returns when the connection is down.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:5000/api/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # Nest boot plus the initial Mongo connection. Failures inside this window
+      # do not count toward `retries` and do not mark the container unhealthy.
+      start_period: 30s
     logging:
       driver: json-file
       options:
@@ -44,6 +55,14 @@ services:
     restart: unless-stopped
     depends_on:
       - api
+    healthcheck:
+      # nginx's own static /healthz, not /api/readyz — this reports the web
+      # tier, and must not go red merely because the api is down.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
     logging:
       driver: json-file
       options:

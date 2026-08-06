@@ -1,0 +1,13 @@
+# These scripts are executed by bash on the Linux server. Checked out with CRLF
+# — which is what happens on a Windows clone with core.autocrlf=true — the
+# shebang becomes `#!/usr/bin/env bash\r` and the server fails the deploy with
+# "bad interpreter: no such file or directory". The workspace root pins sync.sh
+# the same way for the same reason.
+*.sh text eol=lf
+
+# Read by the shell (`sed -n 's/^API_TAG=//p'`) and by docker compose, both of
+# which would carry a trailing \r straight into an image tag.
+.env.example text eol=lf
+
+# Parsed by docker compose on the server.
+*.yml text eol=lf

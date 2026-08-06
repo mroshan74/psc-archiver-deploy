@@ -25,10 +25,12 @@ COMPOSE_FILE="$DEPLOY_DIR/compose.prod.yml"
 PROJECT_NAME="psc-archiver"
 ENV_FILE="$DEPLOY_DIR/.env"
 ENV_TEMPLATE="$DEPLOY_DIR/.env.example"
-# Scoped per-user: a shared filename would let whichever user (root, deploy)
-# runs this first own the file and lock the other out with "Permission
-# denied" on every subsequent run by someone else.
-LOCK_FILE="/tmp/psc-archiver-deploy-$(id -un).lock"
+# One shared lock for every account that can deploy. A per-user filename would
+# mean root and the deploy user take *different* locks and so never exclude
+# each other, which defeats the point. The "permission denied" that motivated
+# scoping it per-user is a file-mode problem, and is fixed below by creating
+# the file 0666 — it is a lock token holding no data, so that costs nothing.
+LOCK_FILE="$DEPLOY_DIR/.deploy.lock"
 
 SERVICE="${1:-}"
 TAG="${2:-}"
@@ -37,11 +39,20 @@ TAG="${2:-}"
 [[ "$SERVICE" == "api" || "$SERVICE" == "web" ]] || fail "Unknown service '$SERVICE' (expected 'api' or 'web')."
 
 # One deploy at a time. Two pushes in quick succession would otherwise
-# interleave their pull/up steps against the same compose project. flock is
-# part of util-linux and always present on the server; it is missing on
-# Windows/macOS, where this script is only ever smoke-tested.
+# interleave their pull/up steps against the same compose project — and since
+# `sed -i` below rewrites .env via a temp file and a rename, an interleave
+# silently drops one of the two tag edits and reports success for a tag that
+# was never applied. GitHub's `concurrency:` group cannot prevent this: api and
+# admin are separate repos with separate groups, so their workflows can reach
+# this server at the same moment.
+#
+# flock is part of util-linux and always present on the server; it is missing
+# on Windows/macOS, where this script is only ever smoke-tested.
 if command -v flock >/dev/null 2>&1; then
-  exec 9>"$LOCK_FILE"
+  # Created under umask 000 so whichever account gets here first does not lock
+  # the other out with EACCES on `exec 9>>`.
+  (umask 000; : >>"$LOCK_FILE") 2>/dev/null || true
+  exec 9>>"$LOCK_FILE"
   flock -w 300 9 || fail "Another deploy has held the lock for over 5 minutes."
 else
   warn "flock unavailable — running without a concurrency lock."
@@ -116,8 +127,13 @@ step "Waiting for the app to respond"
 probe() {
   # Checked from inside the web container, which exercises the real path a
   # browser takes: nginx -> (proxy) -> api.
+  #
+  # 127.0.0.1, NOT localhost: Docker's /etc/hosts maps localhost to both
+  # 127.0.0.1 and ::1, BusyBox wget tries ::1 first, and nginx's `listen 80`
+  # binds IPv4 only — so the localhost form is refused on every attempt and
+  # this loop could only ever time out.
   docker compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" \
-    exec -T web wget -q -O /dev/null "http://localhost/api/readyz" 2>/dev/null
+    exec -T web wget -q -O /dev/null "http://127.0.0.1/api/readyz" 2>/dev/null
 }
 
 deadline=$((SECONDS + 60))

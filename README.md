@@ -229,7 +229,9 @@ cd /opt/psc-archiver
 polls `/api/readyz` *through the `web` container's nginx proxy* — which
 needs **both** containers already running. On a server where neither has
 ever been started, deploying one alone with `deploy.sh` will always time out
-waiting for the other one, regardless of which you pick first. Bring both up
+waiting for the other one, regardless of which you pick first. (The `web`
+container itself now *starts* fine without the api — it just returns 502
+until the api appears — but the deploy probe still needs both.) Bring both up
 together, once, instead (after `API_TAG`/`WEB_TAG` in `.env` point at real
 published tags):
 
@@ -250,10 +252,37 @@ normally, since from then on the other container is always already up.
 5. poll `/api/readyz` **from inside the web container** — the real browser path
 6. prune images older than 7 days, keeping a week of rollback targets
 
+Step 5 normally costs 3–10 seconds: the loop probes once *before* its first
+sleep, so a container that is already serving passes immediately. The 60s in
+the script is the failure deadline, not the usual cost. It is not redundant
+with the container healthchecks below — plain Compose only *reports* health, it
+never restarts an unhealthy-but-running container, and `restart: unless-stopped`
+fires on process exit rather than on unhealthy.
+
+**Only one deploy runs at a time.** `deploy.sh` takes an exclusive `flock` on
+`.deploy.lock` in this directory and waits up to 5 minutes for a running deploy
+to finish. The lock is shared across accounts (the file is created `0666`), so a
+hand-run rollback as `root` and a CI deploy as `VPS_USER` still exclude each
+other. This is not covered by GitHub's `concurrency:` group, which is per-repo
+and so cannot serialise an api deploy against a web deploy.
+
 Expect a few seconds of downtime while the container restarts. That is
 accepted: this pipeline optimises for fast, verified iteration rather than
 availability. Real zero-downtime needs two API replicas, which needs a
 distributed lock first (see *Known constraints*).
+
+### Container health
+
+Both services carry a Docker healthcheck, so `docker compose -f compose.prod.yml
+-p psc-archiver ps` reports real status rather than just "Up":
+
+| Service | Probe | Means |
+|---------|-------|-------|
+| `api` | `GET /api/readyz` on `127.0.0.1:5000` | process is up **and** MongoDB is connected |
+| `web` | `GET /healthz` on `127.0.0.1:80` | nginx is serving (deliberately does not depend on the api) |
+
+The api gets a 30s `start_period` for Nest boot plus the first Mongo
+connection; failures inside that window don't count against it.
 
 ## Roll back
 
@@ -332,15 +361,75 @@ first deploy on this server**, this is expected rather than a real failure —
 see the callout under *Deploy* above: bring both containers up together once
 with plain `docker compose up -d` before using `deploy.sh` for the first time.
 
+**Deploy failed at "Another deploy has held the lock for over 5 minutes."**
+Another `deploy.sh` is still running, or one was killed in a way that left its
+shell alive. Check with `ps aux | grep deploy.sh`. There is no stale lock to
+clean up by hand — the kernel releases a `flock` when the holding process dies,
+including on `kill -9` — so if nothing is running, simply retry.
+
+**A container sits at `(unhealthy)`.** Read the last probe's actual output:
+
+```bash
+docker inspect --format '{{json .State.Health}}' psc-archiver-api | jq
+```
+
+For `api` this almost always means `/api/readyz` is returning 503 because
+MongoDB is unreachable — the process is fine, the database is not. Note that
+nothing restarts an unhealthy container automatically; it is a signal, not a
+remediation.
+
 **The API container restarts in a loop.** Almost always a missing or malformed
 env var — the app deliberately refuses to boot without `MONGODB_URI` and
 `JWT_SECRET`. Check `docker compose -f compose.prod.yml -p psc-archiver logs api`.
+
+**502 on `/api` while the api container is healthy.** The `web` container's
+nginx resolves the api by name through Docker's embedded DNS
+(`resolver 127.0.0.11` in `psc-archiver-admin/nginx.conf`) and re-resolves it
+every 10s, so a recreated api container with a new IP is picked up on its own.
+A 502 in the ~10s right after a deploy is that DNS cache expiring and is
+expected — the deploy probe retries through it. A *persistent* 502 means the
+running web image predates that change; redeploy `web` to pick it up.
+
+**Probing by hand from inside the web container.** Use `127.0.0.1`, not
+`localhost`: Docker's `/etc/hosts` maps `localhost` to both `127.0.0.1` and
+`::1`, BusyBox wget tries `::1` first, and nginx's `listen 80` binds IPv4 only,
+so the `localhost` form is refused every time regardless of app state.
+
+```bash
+docker compose -f compose.prod.yml -p psc-archiver exec -T web \
+  wget -q -O- http://127.0.0.1/api/readyz
+```
 
 **`network traefik_proxy declared as external, but could not be found`.** The
 Traefik stack hasn't been started on this server yet — it is what creates that
 network. Bring it up first
 (`ACME_EMAIL=… docker compose -f compose.traefik.yml -p traefik up -d`), then
 retry the app stack.
+
+**`Local changes present in /opt/psc-archiver — skipping git pull` on every
+deploy, with `git status` showing nothing you edited.** Run `git diff` on the
+server: if the only hunks are `old mode 100644` / `new mode 100755` on
+`scripts/*.sh`, that is a file-mode diff, not a content one. It appears when the
+scripts are committed without the executable bit (a Windows clone has
+`core.fileMode=false`, so git never records it) and `setup-app.sh` then
+`chmod +x`es them on the server, where `core.fileMode` is `true`. The checkout
+is then permanently dirty and `deploy.sh` skips its config pull for good — so
+the server keeps running old compose files while reporting a clean deploy. Fixed
+in the repo by recording the bit (`git update-index --chmod=+x scripts/*.sh`);
+to clear a server that is already in this state, drop the mode-only diff and
+pull once by hand:
+
+```bash
+cd /opt/psc-archiver
+git diff --stat          # confirm it is mode-only before discarding anything
+git checkout -- scripts/
+git pull --ff-only
+git status               # clean, and ls -l scripts/ shows 755
+```
+
+Do **not** "fix" this with `git config core.fileMode false` on the server — that
+hides the symptom while leaving the scripts non-executable for anyone who clones
+the repo fresh.
 
 **`permission denied` on `git pull` or `.env` during a deploy.** `VPS_USER`
 is not the account `/opt/psc-archiver` belongs to. Compare `ls -ld
@@ -361,11 +450,13 @@ footer. `GET /api/readyz` also returns the API's `buildId`.
 - **Run exactly one `api` container.** The AI-tagging queue worker holds an
   in-process lock; a second replica would double-process the queue. Scaling
   needs a distributed lock (a Mongo lease document) first.
-- **No monitoring yet.** Container logs are rotated (10 MB × 3) and the health
-  endpoints exist, so a log shipper and uptime checks are additive when needed.
-  Whenever that happens, the acceptance test is *"a log line from the app
-  appears in the dashboard"* — the predecessor project's Loki pipeline was
-  installed but silently dropping everything for a year.
+- **No monitoring yet.** Container logs are rotated (10 MB × 3), and both
+  services now report real health to Docker — so `docker ps` is a truthful
+  local signal, but nothing is watching it and nothing acts on it. Compose does
+  not restart an unhealthy container. A log shipper and an external uptime check
+  are still additive work. Whenever that happens, the acceptance test is *"a log
+  line from the app appears in the dashboard"* — the predecessor project's Loki
+  pipeline was installed but silently dropping everything for a year.
 - **Back up the `letsencrypt` volume.** It holds `acme.json`. Losing it means
   re-issuing certificates and risking Let's Encrypt rate limits.
 - **MongoDB is Atlas**, so database backups are Atlas's job, not this repo's.

@@ -4,6 +4,12 @@
 .env.*
 !.env.example
 
+# The flock token deploy.sh holds for the length of a run. Server-local state,
+# and it must stay untracked — the "local changes" guard in deploy.sh only
+# inspects tracked files, so tracking this would make every deploy skip its
+# own `git pull`.
+.deploy.lock
+
 *.log
 .DS_Store
 Thumbs.db

@@ -69,6 +69,14 @@ services:
         condition: service_healthy
     volumes:
       - ai_tagging_jobs:/app/data/jobs/ai-tagging
+    # Same probes as compose.prod.yml — this stack only earns its keep if a
+    # healthcheck that would fail on the server fails here first.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:5000/api/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   web:
     image: ${WEB_IMAGE:-psc-archiver-web}:${WEB_TAG:-local}
@@ -81,6 +89,12 @@ services:
       - "${WEB_PORT:-8080}:80"
     depends_on:
       - api
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
   # One-shot bootstrap. Idempotent — safe to re-run.
   seed:
