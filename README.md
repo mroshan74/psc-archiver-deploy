@@ -82,9 +82,36 @@ Open **http://localhost:8080** and sign in as `superadmin` / `ChangeMe123!`
 (you will be asked to set a new password). Override with
 `SEED_SUPERADMIN_USERNAME` / `SEED_SUPERADMIN_PASSWORD`.
 
-The seed step is idempotent — re-running it creates nothing twice. It runs
-`scripts/seed-local.mjs` *inside* the `api` image's own Node (via the `seed`
-profile above) — the host you run these commands on never needs Node.js
+The seed step is idempotent — re-running it creates nothing twice. Papers and
+questions are matched against the `_id` in the seed files, so a repeat run
+**updates** the rows that are already there instead of skipping or duplicating
+them. That makes re-running the `seed` profile the way to pick up a correction
+to the seed data, not just a first-run step. The summary line reports
+`created` (genuinely new rows) and `updated` (existing rows rewritten — on a
+no-change re-run that is the full question count, which is expected):
+
+```
+[seed] Done. Papers created: 163, already present: 0, questions created: 14868, updated: 0.   # first run
+[seed] Done. Papers created: 0, already present: 163, questions created: 0, updated: 14868.   # every run after
+```
+
+> ⚠ **A database seeded before the `_id`-matching seeder must be wiped first.**
+> The earlier seeder discarded the source `_id`s, so those questions cannot be
+> matched and a re-seed inserts a *second* full copy (14,868 → 29,833). There is
+> no migration and none is planned — the app is pre-deployment, so the reset is
+> simply to drop the two seeder-owned collections and seed again:
+>
+> ```bash
+> docker compose -f compose.local.yml exec mongo mongosh pscarchiver \
+>   --eval 'db.questions.drop(); db.exampapers.drop()'
+> docker compose -f compose.local.yml --profile seed run --rm seed
+> ```
+>
+> This leaves `users`, `appsettings` and `paperseries` alone, so you stay signed
+> in with the same account.
+
+It runs `scripts/seed-local.mjs` *inside* the `api` image's own Node (via the
+`seed` profile above) — the host you run these commands on never needs Node.js
 installed, only Docker.
 
 To run an exact published build instead of your working tree:
@@ -325,9 +352,17 @@ docker compose -f compose.prod.yml -p psc-archiver run --rm \
   api node dist/scripts/seed-superadmin.js
 ```
 
-Idempotent: it does nothing if a superadmin already exists. Content (exam
-papers and questions) is then imported by signing in and calling
+Idempotent by `_id`: the bootstrap account is always created with the fixed
+ObjectId `6a71ad994b228f7bf76fb569`, so re-seeding, export and import never
+change or unlink it. The script does nothing if that `_id` is already present,
+and if a superadmin exists under a *different* `_id` it warns and exits rather
+than creating a second account.
+
+Content (exam papers and questions) is then imported by signing in and calling
 `POST /api/seeder/import` — `scripts/seed-local.mjs` shows the exact sequence.
+That import is idempotent too, and safe to re-run to apply seed-data
+corrections: papers and questions are upserted against the `_id` in the seed
+files, existing rows are updated in place, and soft-deleted rows are restored.
 
 ---
 
