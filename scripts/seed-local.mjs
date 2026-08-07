@@ -16,6 +16,11 @@
  * against the _id in the seed files, so a repeat run refreshes existing rows
  * rather than duplicating them.
  *
+ * Step 3 always runs a check first and refuses the write if the check reports
+ * questions the seed files do not account for. That is the signal of a database
+ * seeded by the pre-_id-matching seeder, where a real import would insert a
+ * second copy of the whole corpus. Set SEED_FORCE=1 to import anyway.
+ *
  * Runs inside the API image, so it has `dist/scripts/` and Node 22's global
  * fetch. No extra dependencies.
  */
@@ -24,6 +29,7 @@ import { execFileSync } from 'node:child_process'
 const API_BASE_URL = process.env.API_BASE_URL ?? 'http://api:5000'
 const USERNAME = process.env.SEED_SUPERADMIN_USERNAME
 const PASSWORD = process.env.SEED_SUPERADMIN_PASSWORD
+const FORCE = process.env.SEED_FORCE === '1'
 
 const log = (msg) => console.log(`[seed] ${msg}`)
 
@@ -73,30 +79,56 @@ async function login() {
   return token
 }
 
-async function importContent(token) {
-  log('Importing the bundled exam papers and questions...')
-
+async function runSeeder(token, dryRun) {
   const res = await fetch(`${API_BASE_URL}/api/seeder/import`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({ dryRun: false }),
+    body: JSON.stringify({ dryRun }),
   })
 
   const body = await res.text()
   if (!res.ok) {
-    throw new Error(`Content import failed (${res.status}): ${body}`)
+    throw new Error(
+      `Seeder ${dryRun ? 'check' : 'import'} failed (${res.status}): ${body}`,
+    )
   }
+  return JSON.parse(body)
+}
 
-  // questionsUpdated counts every pre-existing row rewritten from the seed
-  // files, not only rows whose content differs — on a repeat run it is the full
-  // question count, which is the expected no-op signal.
-  const result = JSON.parse(body)
+async function checkContent(token) {
+  log('Checking the seed files against the database...')
+  const result = await runSeeder(token, true)
+
+  log(
+    `Check: papers to create ${result.papersCreated}, already present ${result.papersExisting}, ` +
+      `questions to add ${result.questionsCreated}, to refresh ${result.questionsUpdated}, ` +
+      `not in the files ${result.questionsUnmatchedCount}.`,
+  )
+
+  if (result.questionsUnmatchedCount > 0 && !FORCE) {
+    throw new Error(
+      `Refusing to import: ${result.questionsUnmatchedCount} questions on these papers are not in the seed files.\n` +
+        '[seed] That is what a database seeded before _id matching looks like — importing would add a second copy of every question.\n' +
+        '[seed] Drop the seeder-owned collections and seed again:\n' +
+        "[seed]   docker compose -f compose.local.yml exec mongo mongosh pscarchiver --eval 'db.questions.drop(); db.exampapers.drop()'\n" +
+        '[seed] Or set SEED_FORCE=1 if you are certain those extra questions should stay.',
+    )
+  }
+}
+
+async function importContent(token) {
+  log('Importing the bundled exam papers and questions...')
+  const result = await runSeeder(token, false)
+
+  // These are true change counts: the seeder does not stamp updatedAt, so a
+  // repeat run with no seed-file edits reports created 0 / changed 0.
   log(
     `Done. Papers created: ${result.papersCreated}, already present: ${result.papersExisting}, ` +
-      `questions created: ${result.questionsCreated}, updated: ${result.questionsUpdated}.`,
+      `questions created: ${result.questionsCreated}, changed: ${result.questionsUpdated}, ` +
+      `brought back: ${result.questionsRestored}.`,
   )
 }
 
@@ -110,6 +142,7 @@ async function main() {
   seedSuperadmin()
   await waitForApi()
   const token = await login()
+  await checkContent(token)
   await importContent(token)
 
   log('')

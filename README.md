@@ -86,20 +86,30 @@ The seed step is idempotent — re-running it creates nothing twice. Papers and
 questions are matched against the `_id` in the seed files, so a repeat run
 **updates** the rows that are already there instead of skipping or duplicating
 them. That makes re-running the `seed` profile the way to pick up a correction
-to the seed data, not just a first-run step. The summary line reports
-`created` (genuinely new rows) and `updated` (existing rows rewritten — on a
-no-change re-run that is the full question count, which is expected):
+to the seed data, not just a first-run step.
+
+The script always runs a **check** before it writes, then reports true change
+counts — `created` is genuinely new rows and `changed` is rows whose content
+actually differed, because the seeder does not stamp `updatedAt`. A re-run with
+no edits to the seed files therefore reports **zero of both**:
 
 ```
-[seed] Done. Papers created: 163, already present: 0, questions created: 14868, updated: 0.   # first run
-[seed] Done. Papers created: 0, already present: 163, questions created: 0, updated: 14868.   # every run after
+# first run
+[seed] Check: papers to create 163, already present 0, questions to add 14868, to refresh 0, not in the files 0.
+[seed] Done. Papers created: 163, already present: 0, questions created: 14868, changed: 0, brought back: 0.
+
+# every run after, with no seed-file edits
+[seed] Check: papers to create 0, already present 163, questions to add 0, to refresh 14868, not in the files 0.
+[seed] Done. Papers created: 0, already present: 163, questions created: 0, changed: 0, brought back: 0.
 ```
 
 > ⚠ **A database seeded before the `_id`-matching seeder must be wiped first.**
 > The earlier seeder discarded the source `_id`s, so those questions cannot be
-> matched and a re-seed inserts a *second* full copy (14,868 → 29,833). There is
-> no migration and none is planned — the app is pre-deployment, so the reset is
-> simply to drop the two seeder-owned collections and seed again:
+> matched and an import would insert a *second* full copy (14,868 → 29,833).
+> **The check now catches this and the script refuses to write** — it reports the
+> unmatched rows under `not in the files`. There is no migration and none is
+> planned: the app is pre-deployment, so the reset is simply to drop the two
+> seeder-owned collections and seed again:
 >
 > ```bash
 > docker compose -f compose.local.yml exec mongo mongosh pscarchiver \
@@ -108,7 +118,16 @@ no-change re-run that is the full question count, which is expected):
 > ```
 >
 > This leaves `users`, `appsettings` and `paperseries` alone, so you stay signed
-> in with the same account.
+> in with the same account. Set `SEED_FORCE=1` to import anyway — only do that
+> when you know the extra questions are ones you added deliberately and want to
+> keep.
+
+Two more things a re-run does, both reported rather than silent: it **brings
+back** papers and questions that were deleted but are still listed in the seed
+files (the files are the source of truth), and it **resets a paper's status** to
+whatever the file says. The seeder never deletes anything — questions on a
+seeded paper that the files no longer list are counted under `not in the files`
+and left alone.
 
 It runs `scripts/seed-local.mjs` *inside* the `api` image's own Node (via the
 `seed` profile above) — the host you run these commands on never needs Node.js
@@ -362,7 +381,16 @@ Content (exam papers and questions) is then imported by signing in and calling
 `POST /api/seeder/import` — `scripts/seed-local.mjs` shows the exact sequence.
 That import is idempotent too, and safe to re-run to apply seed-data
 corrections: papers and questions are upserted against the `_id` in the seed
-files, existing rows are updated in place, and soft-deleted rows are restored.
+files, existing rows are updated in place, and deleted rows are restored.
+
+**`dryRun` defaults to `true`**, so a request that omits the field performs a
+check and writes nothing. Always run the check first and read
+`questionsUnmatchedCount` before sending `{ "dryRun": false }` — a non-zero value
+means the database holds questions the seed files do not account for, which on a
+production database is a reason to stop and look, not to import. The whole run
+is also validated up front: if the seed files have a bad or duplicated `_id`, or
+a paper code that belongs to a different paper than the file's `_id` does, the
+request is rejected with the list of problems and **nothing is written**.
 
 ---
 
