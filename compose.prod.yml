@@ -2,10 +2,12 @@
 # scripts/deploy.sh — do not run `docker compose` here by hand except to
 # inspect state.
 #
-# One public hostname, one origin: Traefik terminates TLS and routes to the web
-# container, which serves the SPA and proxies /api to the api container over
-# the internal network. The api is never routed directly, so there is no CORS
-# in production and only one certificate.
+# Two public hostnames, each its own origin: Traefik terminates TLS and routes
+# ADMIN_HOST to `web` (the staff back office) and LEARNER_HOST to `learner` (the
+# learner app). Each container serves its own SPA and proxies /api to the shared
+# api container over the internal network. The api is never routed directly, so
+# there is no CORS in production — but there are now two certificates, and both
+# hostnames must resolve to this server before their first deploy.
 
 # docker compose -f compose.prod.yml -p psc-archiver up -d
 
@@ -72,11 +74,45 @@ services:
       - traefik_proxy
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.archiver.rule=Host(`${APP_HOST:?APP_HOST is not set in .env}`)"
+      - "traefik.http.routers.archiver.rule=Host(`${ADMIN_HOST:?ADMIN_HOST is not set in .env}`)"
       - "traefik.http.routers.archiver.entrypoints=websecure"
       - "traefik.http.routers.archiver.tls.certresolver=letsencrypt"
       # Traefik can infer this from EXPOSE, but stating it removes the guess.
       - "traefik.http.services.archiver.loadbalancer.server.port=80"
+
+  # The learner-facing SPA (psc-archiver-client). Same shape as `web` — its own
+  # nginx, its own /api proxy to the same api container, its own certificate.
+  # Two SPAs cannot both own `/` behind one origin, which is why this is a
+  # second hostname rather than a path prefix on the first.
+  learner:
+    image: ${LEARNER_IMAGE:-ghcr.io/mroshan74/psc-archiver-client}:${LEARNER_TAG:?LEARNER_TAG is not set in .env}
+    container_name: psc-archiver-learner
+    restart: unless-stopped
+    depends_on:
+      - api
+    healthcheck:
+      # nginx's own static /healthz, not /api/readyz — this reports the learner
+      # web tier, and must not go red merely because the api is down.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - traefik_proxy
+    labels:
+      - "traefik.enable=true"
+      # Router and service names must be unique across the whole Docker
+      # provider, so this cannot reuse `archiver`.
+      - "traefik.http.routers.learner.rule=Host(`${LEARNER_HOST:?LEARNER_HOST is not set in .env}`)"
+      - "traefik.http.routers.learner.entrypoints=websecure"
+      - "traefik.http.routers.learner.tls.certresolver=letsencrypt"
+      - "traefik.http.services.learner.loadbalancer.server.port=80"
 
 volumes:
   ai_tagging_jobs:

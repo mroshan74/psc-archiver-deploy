@@ -2,7 +2,7 @@
 #
 # Go back to a previously published image tag.
 #
-#   ./scripts/rollback.sh <api|web> <tag>
+#   ./scripts/rollback.sh <api|web|learner> <tag>
 #   ./scripts/rollback.sh api          # lists the tags available locally
 #
 # Rollback is just a deploy of an older tag: every build is pushed to GHCR
@@ -16,11 +16,16 @@ SERVICE="${1:-}"
 TAG="${2:-}"
 
 if [[ -z "$SERVICE" ]]; then
-  echo "Usage: $0 <api|web> <tag>" >&2
+  echo "Usage: $0 <api|web|learner> <tag>" >&2
   exit 1
 fi
 
-IMAGE_VAR="$([[ "$SERVICE" == "api" ]] && echo API_IMAGE || echo WEB_IMAGE)"
+case "$SERVICE" in
+  api)     IMAGE_VAR=API_IMAGE ;;
+  web)     IMAGE_VAR=WEB_IMAGE ;;
+  learner) IMAGE_VAR=LEARNER_IMAGE ;;
+  *)       echo "Unknown service '$SERVICE' (expected 'api', 'web', or 'learner')." >&2; exit 1 ;;
+esac
 IMAGE="$(sed -n "s/^${IMAGE_VAR}=//p" "$SCRIPT_DIR/../.env" | head -1)"
 
 if [[ -z "$TAG" ]]; then

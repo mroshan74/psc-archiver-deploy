@@ -2,7 +2,11 @@
 #
 # Deploy one service to a specific, immutable image tag.
 #
-#   ./scripts/deploy.sh <api|web> <tag>
+#   ./scripts/deploy.sh <api|web|learner> <tag>
+#
+#     api      NestJS backend      (psc-archiver-api)
+#     web      staff back office   (psc-archiver-admin)
+#     learner  learner-facing app  (psc-archiver-client)
 #
 # Invoked over SSH by GitHub Actions, and by hand for rollbacks. Safe to run
 # repeatedly; deploying the tag that is already live is a no-op restart.
@@ -35,16 +39,19 @@ LOCK_FILE="$DEPLOY_DIR/.deploy.lock"
 SERVICE="${1:-}"
 TAG="${2:-}"
 
-[[ -n "$SERVICE" && -n "$TAG" ]] || fail "Usage: $0 <api|web> <tag>"
-[[ "$SERVICE" == "api" || "$SERVICE" == "web" ]] || fail "Unknown service '$SERVICE' (expected 'api' or 'web')."
+[[ -n "$SERVICE" && -n "$TAG" ]] || fail "Usage: $0 <api|web|learner> <tag>"
+case "$SERVICE" in
+  api|web|learner) ;;
+  *) fail "Unknown service '$SERVICE' (expected 'api', 'web', or 'learner')." ;;
+esac
 
 # One deploy at a time. Two pushes in quick succession would otherwise
 # interleave their pull/up steps against the same compose project — and since
 # `sed -i` below rewrites .env via a temp file and a rename, an interleave
 # silently drops one of the two tag edits and reports success for a tag that
-# was never applied. GitHub's `concurrency:` group cannot prevent this: api and
-# admin are separate repos with separate groups, so their workflows can reach
-# this server at the same moment.
+# was never applied. GitHub's `concurrency:` group cannot prevent this: api,
+# admin and client are three separate repos with three separate groups, so
+# their workflows can reach this server at the same moment.
 #
 # flock is part of util-linux and always present on the server; it is missing
 # on Windows/macOS, where this script is only ever smoke-tested.
@@ -94,7 +101,11 @@ fi
 ok "All $(env_keys "$ENV_TEMPLATE" | wc -l | tr -d ' ') expected keys present"
 
 # ── 3. Record the tag (this is the rollback trail) ─────────────────────────
-TAG_VAR="$([[ "$SERVICE" == "api" ]] && echo API_TAG || echo WEB_TAG)"
+case "$SERVICE" in
+  api)     TAG_VAR=API_TAG ;;
+  web)     TAG_VAR=WEB_TAG ;;
+  learner) TAG_VAR=LEARNER_TAG ;;
+esac
 PREVIOUS_TAG="$(sed -n "s/^${TAG_VAR}=//p" "$ENV_FILE" | head -1)"
 
 step "Setting ${TAG_VAR}=${TAG} (was ${PREVIOUS_TAG:-unset})"
@@ -123,9 +134,14 @@ step "Starting ${SERVICE}"
 docker compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" up -d --no-deps "$SERVICE"
 
 # ── 5. Verify. A container that started is not a deploy that worked. ───────
-step "Waiting for the app to respond"
+# Probe through the nginx of the tier just deployed, so a learner deploy is
+# proved through the learner's own proxy rather than the admin's. An api deploy
+# is still proved through `web`, unchanged.
+PROBE_SERVICE="$([[ "$SERVICE" == "learner" ]] && echo learner || echo web)"
+
+step "Waiting for the app to respond (via ${PROBE_SERVICE})"
 probe() {
-  # Checked from inside the web container, which exercises the real path a
+  # Checked from inside a web container, which exercises the real path a
   # browser takes: nginx -> (proxy) -> api.
   #
   # 127.0.0.1, NOT localhost: Docker's /etc/hosts maps localhost to both
@@ -133,7 +149,7 @@ probe() {
   # binds IPv4 only — so the localhost form is refused on every attempt and
   # this loop could only ever time out.
   docker compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" \
-    exec -T web wget -q -O /dev/null "http://127.0.0.1/api/readyz" 2>/dev/null
+    exec -T "$PROBE_SERVICE" wget -q -O /dev/null "http://127.0.0.1/api/readyz" 2>/dev/null
 }
 
 deadline=$((SECONDS + 60))

@@ -29,8 +29,9 @@
 # Afterwards you still have to, by hand — the script prints these and saves them
 # to /opt/psc-archiver/REMAINING-STEPS.txt:
 #   1. fill in /opt/psc-archiver/.env      (copied from .env.example)
-#   2. set the VPS_USER / VPS_HOST / VPS_SSH_KEY GitHub secrets
-#   3. point APP_HOST's DNS A record at this server
+#   2. set the VPS_USER / VPS_HOST / VPS_SSH_KEY GitHub secrets, in all three
+#      app repos
+#   3. point ADMIN_HOST's and LEARNER_HOST's DNS A records at this server
 #   4. bring up Traefik — that is what creates the shared traefik_proxy network
 #   5. log in to GHCR, if you declined the prompt for it here
 
@@ -150,7 +151,7 @@ else
 fi
 
 # ── GHCR access ────────────────────────────────────────────────────────────
-# Both images are private, so every deploy fails with "unauthorized" until this
+# All three images are private, so every deploy fails with "unauthorized" until this
 # account has logged in once. Offered here rather than left to the printed steps
 # because forgetting it is the single most common first-deploy failure.
 #
@@ -165,7 +166,7 @@ if [[ -f "$DOCKER_CFG" ]] && grep -q '"ghcr\.io"' "$DOCKER_CFG"; then
   GHCR_DONE="yes"
   ok "Credentials for ghcr.io are already stored for '$RUN_AS'"
 else
-  note "Both images are private — deploys fail with \"unauthorized\" until '$RUN_AS' logs in once."
+  note "All three images are private — deploys fail with \"unauthorized\" until '$RUN_AS' logs in once."
   note "The command that will run:"
   echo "    echo \"<PAT>\" | docker login ghcr.io -u <github-username> --password-stdin"
   note "The PAT comes from github.com/settings/tokens — classic, scope read:packages."
@@ -218,10 +219,13 @@ Remaining steps:
 
   1. Fill in the environment:
        nano $APP_DIR/.env
-     At minimum: APP_HOST, MONGODB_URI, JWT_SECRET, OPENAI_API_KEY.
+     At minimum: ADMIN_HOST, LEARNER_HOST, MONGODB_URI, JWT_SECRET,
+     OPENAI_API_KEY. Set CLIENT_URL to BOTH https:// origins, comma-separated —
+     it replaces the API's fallback list rather than extending it.
 
-  2. In BOTH app repos' GitHub settings, set the deploy secrets. VPS_USER is
-     the account this script just ran as — CI has to be that same account, or
+  2. In ALL THREE app repos' GitHub settings (psc-archiver-api,
+     psc-archiver-admin, psc-archiver-client), set the deploy secrets. VPS_USER
+     is the account this script just ran as — CI has to be that same account, or
      it cannot write to $APP_DIR:
        VPS_USER                 $RUN_AS
        VPS_HOST                 this server's IP or hostname
@@ -231,8 +235,9 @@ Remaining steps:
      and have its PUBLIC half installed on '$RUN_AS' by whoever manages server
      access — this script never writes authorized_keys.
 
-  3. Point the APP_HOST DNS A record at this server and let it propagate.
-     Let's Encrypt cannot issue a certificate until it resolves here.
+  3. Point BOTH DNS A records — ADMIN_HOST and LEARNER_HOST — at this server
+     and let them propagate. Each host gets its own certificate, and Let's
+     Encrypt cannot issue one until that name resolves here.
 
   4. Start the edge proxy. This also CREATES the shared traefik_proxy network,
      which compose.prod.yml joins as external — so it must come before step 6:
@@ -241,14 +246,16 @@ Remaining steps:
 
 $GHCR_STEP
 
-  6. FIRST deploy only: deploy.sh's health check execs into the 'web'
-     container and curls /api/readyz through its nginx proxy — so it needs
-     BOTH containers already running, which isn't true yet. Bring them up
-     together once instead (after setting real API_TAG/WEB_TAG in .env):
+  6. FIRST deploy only: deploy.sh's health check execs into a web container
+     and curls /api/readyz through its nginx proxy — so it needs the api
+     container already running, which isn't true yet. Bring them all up
+     together once instead (after setting real API_TAG/WEB_TAG/LEARNER_TAG
+     in .env):
        docker compose -f compose.prod.yml -p psc-archiver up -d
      Every deploy after this one — from CI or by hand — can safely use:
        ./scripts/deploy.sh api <tag>
-       ./scripts/deploy.sh web <tag>
+       ./scripts/deploy.sh web <tag>       # staff back office
+       ./scripts/deploy.sh learner <tag>   # learner-facing app
 
   7. Create the first admin account (only once, on an empty database):
        docker compose -f compose.prod.yml -p psc-archiver run --rm \\

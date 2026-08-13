@@ -1,7 +1,8 @@
 # psc-archiver-deploy
 
 Deployment configuration for **PSC Archiver** — the NestJS API (`psc-archiver-api`)
-and the React admin SPA (`psc-archiver-admin`).
+and its two React SPAs: the staff back office (`psc-archiver-admin`) and the
+learner-facing app (`psc-archiver-client`).
 
 Infrastructure lives in its own repo on purpose. In the two predecessor
 projects it was buried inside an application repo, and in both cases the copy
@@ -16,44 +17,64 @@ Fill these in — the checked-in files use placeholders.
 
 | Placeholder | Where | What to put |
 |---|---|---|
-| `APP_HOST` | `/opt/psc-archiver/.env` | The public hostname, e.g. `archiver.trynbuild.com` |
+| `ADMIN_HOST` | `/opt/psc-archiver/.env` | Staff back-office hostname, e.g. `archiver.trynbuild.com` |
+| `LEARNER_HOST` | `.env` | Learner-app hostname, e.g. `learner.trynbuild.com` |
+| `CLIENT_URL` | `.env` | The API's CORS allow-list. Must name **both** origins, comma-separated |
 | `ACME_EMAIL` | passed to `compose.traefik.yml` | Where Let's Encrypt sends expiry warnings |
 | `REPO_URL` | `scripts/setup-app.sh` | This repo's clone URL, if not `mroshan74/psc-archiver-deploy` |
-| `API_IMAGE` / `WEB_IMAGE` | `.env` | GHCR paths, if the owner is not `mroshan74` |
+| `API_IMAGE` / `WEB_IMAGE` / `LEARNER_IMAGE` | `.env` | GHCR paths, if the owner is not `mroshan74` |
 | `MONGODB_URI`, `JWT_SECRET`, `OPENAI_API_KEY` | `.env` | Real credentials |
+
+> ⚠ **`APP_HOST` was renamed to `ADMIN_HOST`** when the learner app arrived. A
+> server whose `.env` still has the old key stops on `deploy.sh`'s environment
+> check — which runs **before anything is touched**, so a mistimed deploy is a
+> clean no-op rather than an outage. Rename the key by hand and re-run.
 
 ---
 
 ## Architecture
 
 ```
-                       ┌──────────── VPS ─────────────────────────────┐
-  browser ── HTTPS ──▶ │  traefik  (:80 → :443, Let's Encrypt)        │
-                       │     │                                        │
-                       │     ▼  Host(APP_HOST)                        │
-                       │  web  nginx ── SPA                           │
-                       │        └────── /api/* ──proxy──▶ api :5000   │
-                       └──────────────────────────────────────────────┘
-                                                            │
-                                                            ▼
-                                                   MongoDB Atlas
+                        ┌──────────── VPS ────────────────────────────────┐
+  browser ─── HTTPS ──▶ │  traefik  (:80 → :443, Let's Encrypt)           │
+                        │     │                                           │
+                        │     ├─▶ Host(ADMIN_HOST)                        │
+                        │     │    web      nginx ── admin SPA            │
+                        │     │              └───── /api/* ──proxy─┐      │
+                        │     │                                    │      │
+                        │     └─▶ Host(LEARNER_HOST)               ├─▶ api│
+                        │          learner  nginx ── learner SPA   │ :5000│
+                        │                    ├──── /api/* ──proxy──┘      │
+                        │                    └──── /fonts/* (PDF faces)   │
+                        └─────────────────────────────────────────────────┘
+                                                             │
+                                                             ▼
+                                                     MongoDB Atlas
 ```
 
-**One hostname, one origin.** The SPA is built with an empty `VITE_BACKEND_URL`,
-so it calls the relative path `/api`, and nginx forwards that to the API
-container. Consequences worth knowing:
+**Two hostnames, each its own origin.** Each SPA is built with an empty
+`VITE_BACKEND_URL`, so it calls the relative path `/api`, and its own nginx
+forwards that to the shared API container. Two SPAs cannot both own `/` behind
+one origin, which is why this is a second hostname rather than a path prefix.
+Consequences worth knowing:
 
-- No CORS in production, and only one TLS certificate.
+- No CORS in production — but **two** TLS certificates, so both DNS records must
+  resolve here before their first deploy.
 - The API is **never routed by Traefik** (`traefik.enable=false`) and publishes
   no host port. It is only reachable from inside the Docker network.
-- The same web image works locally and in production — there is no baked-in
-  backend hostname, so no per-environment rebuild.
+- Traefik router and service names must be unique across the whole Docker
+  provider: the admin's are `archiver`, the learner's are `learner`.
+- Both web images work locally and in production — there is no baked-in backend
+  hostname, so no per-environment rebuild.
+- `CLIENT_URL` (the API's CORS allow-list) **replaces** the built-in fallback
+  rather than extending it, so it has to name every origin. Adding a third
+  frontend without updating it silently drops the others.
 
 ## Repository layout
 
 | File | Purpose |
 |---|---|
-| `compose.prod.yml` | The production stack (`api` + `web`) |
+| `compose.prod.yml` | The production stack (`api` + `web` + `learner`) |
 | `compose.traefik.yml` | Edge proxy and TLS. Brought up once, then left alone |
 | `compose.local.yml` | Prod-parity local stack, with its own MongoDB |
 | `.env.example` | The key schema `deploy.sh` validates the server's `.env` against |
@@ -71,16 +92,31 @@ production. It is the fastest way to see the app, demo it, or check a change
 before pushing — and it is where the deployment setup itself gets tested.
 
 ```bash
-git clone <this repo>            # next to psc-archiver-api and psc-archiver-admin
+# clone next to psc-archiver-api, psc-archiver-admin and psc-archiver-client —
+# the compose build contexts are ../<repo>, so all four sit side by side
+git clone <this repo>
 cd psc-archiver-deploy
 
 docker compose -f compose.local.yml up -d --build          # builds your working tree
 docker compose -f compose.local.yml --profile seed run --rm seed   # first run only
 ```
 
-Open **http://localhost:8080** and sign in as `superadmin` / `ChangeMe123!`
-(you will be asked to set a new password). Override with
-`SEED_SUPERADMIN_USERNAME` / `SEED_SUPERADMIN_PASSWORD`.
+| | URL | |
+|---|---|---|
+| **Admin** | http://localhost:8080 | sign in as `superadmin` / `ChangeMe123!` (you will be asked to set a new password) |
+| **Learner** | http://localhost:8081 | sign in by mobile number; the one-time code is printed in the api logs |
+
+Override the seeded account with `SEED_SUPERADMIN_USERNAME` /
+`SEED_SUPERADMIN_PASSWORD`, and the ports with `WEB_PORT` / `LEARNER_PORT`.
+
+> **This stack is the only place two things get tested before a server sees
+> them**, because `pnpm dev` exercises neither: each SPA's single-origin `/api`
+> proxy (dev is cross-origin to `:5000`), and the learner app's PDF fonts, which
+> are fetched over HTTP at render time from `/fonts/` — including
+> `Century Schoolbook Std Regular.otf`, spaces and all. If that one 404s, every
+> Malayalam export fails and there is no CDN fallback. After touching either
+> app's `nginx.conf`, download a paper here and watch the network tab for the
+> four font requests.
 
 The seed step is idempotent — re-running it creates nothing twice. Papers and
 questions are matched against the `_id` in the seed files, so a repeat run
@@ -138,7 +174,8 @@ To run an exact published build instead of your working tree:
 ```bash
 export API_IMAGE=ghcr.io/mroshan74/psc-archiver-api
 export WEB_IMAGE=ghcr.io/mroshan74/psc-archiver-web
-export API_TAG=a1b2c3d WEB_TAG=a1b2c3d
+export LEARNER_IMAGE=ghcr.io/mroshan74/psc-archiver-client
+export API_TAG=a1b2c3d WEB_TAG=a1b2c3d LEARNER_TAG=a1b2c3d
 docker compose -f compose.local.yml pull
 docker compose -f compose.local.yml up -d --no-build
 ```
@@ -222,8 +259,9 @@ ssh-keygen -t ed25519 -C psc-archiver-ci -f ci-deploy-key
 ```
 
 Hand `ci-deploy-key.pub` to whoever manages access on that server, to be
-installed on the account above. Then, in the GitHub settings of **both** app
-repos, add these secrets:
+installed on the account above. Then, in the GitHub settings of **all three**
+app repos — `psc-archiver-api`, `psc-archiver-admin`, `psc-archiver-client` —
+add these secrets:
 
 | Secret | Value |
 |---|---|
@@ -233,8 +271,8 @@ repos, add these secrets:
 | `VPS_SSH_KEY_PASSPHRASE` | The passphrase you set above |
 
 That covers the **push**: CI authenticates to GHCR with the built-in
-`GITHUB_TOKEN`, no secret to add. It does not cover the **pull** — both GHCR
-packages are private (they inherit that from the source repos), and the VPS
+`GITHUB_TOKEN`, no secret to add. It does not cover the **pull** — all three
+GHCR packages are private (they inherit that from the source repos), and the VPS
 has no access to `GITHUB_TOKEN`, so it needs its own one-time login before
 the first deploy. `setup-app.sh` offers to do this for you; to do it by hand
 instead, or later:
@@ -260,42 +298,58 @@ owns the shared `traefik_proxy` network; `compose.prod.yml` joins it as
 
 ## Deploy
 
-**Normally you do nothing.** Push to `master` in either app repo and CI builds,
-publishes to GHCR, and runs `deploy.sh` over SSH.
+**Normally you do nothing.** Push to the default branch in any of the three app
+repos and CI builds, publishes to GHCR, and runs `deploy.sh` over SSH. Note the
+branch differs: `master` for the api and admin, **`main`** for the client.
+
+| Repo | Service | Image |
+|---|---|---|
+| `psc-archiver-api` | `api` | `ghcr.io/mroshan74/psc-archiver-api` |
+| `psc-archiver-admin` | `web` | `ghcr.io/mroshan74/psc-archiver-web` |
+| `psc-archiver-client` | `learner` | `ghcr.io/mroshan74/psc-archiver-client` |
 
 By hand, on the server:
 
 ```bash
 cd /opt/psc-archiver
 ./scripts/deploy.sh api a1b2c3d
-./scripts/deploy.sh web a1b2c3d
+./scripts/deploy.sh web a1b2c3d       # staff back office
+./scripts/deploy.sh learner a1b2c3d   # learner-facing app
 ```
 
 **Exception: the very first deploy on a brand-new server.** Step 5 below
-polls `/api/readyz` *through the `web` container's nginx proxy* — which
-needs **both** containers already running. On a server where neither has
-ever been started, deploying one alone with `deploy.sh` will always time out
-waiting for the other one, regardless of which you pick first. (The `web`
-container itself now *starts* fine without the api — it just returns 502
-until the api appears — but the deploy probe still needs both.) Bring both up
-together, once, instead (after `API_TAG`/`WEB_TAG` in `.env` point at real
-published tags):
+polls `/api/readyz` *through a web container's nginx proxy* — which needs the
+`api` container already running. On a server where nothing has ever been
+started, deploying one service alone with `deploy.sh` will always time out
+waiting for the api, regardless of which you pick first. (A web container
+itself now *starts* fine without the api — it just returns 502 until the api
+appears — but the deploy probe still needs it.) Bring them all up together,
+once, instead (after `API_TAG` / `WEB_TAG` / `LEARNER_TAG` in `.env` point at
+real published tags):
 
 ```bash
 docker compose -f compose.prod.yml -p psc-archiver up -d
 ```
 
 Every deploy after that — from CI or by hand — can go through `deploy.sh`
-normally, since from then on the other container is always already up.
+normally, since from then on the api container is always already up.
+
+This is *not* a problem when adding a new frontend to a stack that is already
+running: `deploy.sh` creates the container in step 4 and probes it in step 5,
+and the api it proxies to is already serving. The first `deploy.sh learner`
+against a live stack works with no special handling.
 
 `deploy.sh` will:
 
 1. `git pull` this repo, so the config is the committed one
 2. check the server's `.env` has every key present in `.env.example`, and
    **abort before touching anything** if not
-3. write the tag into `.env` (and `BUILD_ID`, for the api)
+3. write the tag into `.env` (`API_TAG` / `WEB_TAG` / `LEARNER_TAG`, and
+   `BUILD_ID` for the api)
 4. pull the image, then recreate only that one service
-5. poll `/api/readyz` **from inside the web container** — the real browser path
+5. poll `/api/readyz` **from inside the web container of the tier just
+   deployed** — the real browser path. A `learner` deploy is verified through
+   the learner's own nginx; `api` and `web` deploys go through `web`
 6. prune images older than 7 days, keeping a week of rollback targets
 
 Step 5 normally costs 3–10 seconds: the loop probes once *before* its first
@@ -310,7 +364,7 @@ fires on process exit rather than on unhealthy.
 to finish. The lock is shared across accounts (the file is created `0666`), so a
 hand-run rollback as `root` and a CI deploy as `VPS_USER` still exclude each
 other. This is not covered by GitHub's `concurrency:` group, which is per-repo
-and so cannot serialise an api deploy against a web deploy.
+and so cannot serialise the three app repos' deploys against each other.
 
 Expect a few seconds of downtime while the container restarts. That is
 accepted: this pipeline optimises for fast, verified iteration rather than
@@ -319,13 +373,14 @@ distributed lock first (see *Known constraints*).
 
 ### Container health
 
-Both services carry a Docker healthcheck, so `docker compose -f compose.prod.yml
--p psc-archiver ps` reports real status rather than just "Up":
+All three services carry a Docker healthcheck, so `docker compose -f
+compose.prod.yml -p psc-archiver ps` reports real status rather than just "Up":
 
 | Service | Probe | Means |
 |---------|-------|-------|
 | `api` | `GET /api/readyz` on `127.0.0.1:5000` | process is up **and** MongoDB is connected |
-| `web` | `GET /healthz` on `127.0.0.1:80` | nginx is serving (deliberately does not depend on the api) |
+| `web` | `GET /healthz` on `127.0.0.1:80` | admin nginx is serving (deliberately does not depend on the api) |
+| `learner` | `GET /healthz` on `127.0.0.1:80` | learner nginx is serving (same — independent of the api) |
 
 The api gets a 30s `start_period` for Nest boot plus the first Mongo
 connection; failures inside that window don't count against it.
@@ -338,8 +393,9 @@ deploy of an older tag:
 
 ```bash
 cd /opt/psc-archiver
-./scripts/rollback.sh api               # list tags available on this host
-./scripts/rollback.sh api 9f8e7d6       # go back to that build
+./scripts/rollback.sh api                   # list tags available on this host
+./scripts/rollback.sh api 9f8e7d6           # go back to that build
+./scripts/rollback.sh learner 9f8e7d6       # same, for the learner app
 ```
 
 Or from the GitHub UI, without SSH: **Actions → Build, Push & Deploy → Run
@@ -421,7 +477,7 @@ untouched.
 but not serving. The last 40 log lines are printed above the failure. Roll back
 with the command the script prints, then investigate. **If this is the very
 first deploy on this server**, this is expected rather than a real failure —
-see the callout under *Deploy* above: bring both containers up together once
+see the callout under *Deploy* above: bring all the containers up together once
 with plain `docker compose up -d` before using `deploy.sh` for the first time.
 
 **Deploy failed at "Another deploy has held the lock for over 5 minutes."**
@@ -445,15 +501,16 @@ remediation.
 env var — the app deliberately refuses to boot without `MONGODB_URI` and
 `JWT_SECRET`. Check `docker compose -f compose.prod.yml -p psc-archiver logs api`.
 
-**502 on `/api` while the api container is healthy.** The `web` container's
-nginx resolves the api by name through Docker's embedded DNS
-(`resolver 127.0.0.11` in `psc-archiver-admin/nginx.conf`) and re-resolves it
-every 10s, so a recreated api container with a new IP is picked up on its own.
-A 502 in the ~10s right after a deploy is that DNS cache expiring and is
-expected — the deploy probe retries through it. A *persistent* 502 means the
-running web image predates that change; redeploy `web` to pick it up.
+**502 on `/api` while the api container is healthy.** Applies to both `web` and
+`learner`. Their nginx resolves the api by name through Docker's embedded DNS
+(`resolver 127.0.0.11` in `psc-archiver-admin/nginx.conf` and
+`psc-archiver-client/nginx.conf`) and re-resolves it every 10s, so a recreated
+api container with a new IP is picked up on its own. A 502 in the ~10s right
+after a deploy is that DNS cache expiring and is expected — the deploy probe
+retries through it. A *persistent* 502 means the running web image predates that
+change; redeploy that service to pick it up.
 
-**Probing by hand from inside the web container.** Use `127.0.0.1`, not
+**Probing by hand from inside a web container.** Use `127.0.0.1`, not
 `localhost`: Docker's `/etc/hosts` maps `localhost` to both `127.0.0.1` and
 `::1`, BusyBox wget tries `::1` first, and nginx's `listen 80` binds IPv4 only,
 so the `localhost` form is refused every time regardless of app state.
@@ -461,7 +518,26 @@ so the `localhost` form is refused every time regardless of app state.
 ```bash
 docker compose -f compose.prod.yml -p psc-archiver exec -T web \
   wget -q -O- http://127.0.0.1/api/readyz
+
+docker compose -f compose.prod.yml -p psc-archiver exec -T learner \
+  wget -q -O- http://127.0.0.1/api/readyz
 ```
+
+**Malayalam PDF exports fail on the learner app.** The exporter fetches four
+faces from `/fonts/` at render time and has no CDN fallback, so a 404 on any of
+them kills every export. The one that breaks is
+`Century Schoolbook Std Regular.otf` — spaces in the filename, requested
+`encodeURI`'d as `%20`. Check it directly:
+
+```bash
+docker compose -f compose.prod.yml -p psc-archiver exec -T learner \
+  wget -S -q -O /dev/null "http://127.0.0.1/fonts/Century%20Schoolbook%20Std%20Regular.otf"
+```
+
+Expect `200 OK` and `Content-Type: font/otf`. A 404 means the `location ^~
+/fonts/` block in `psc-archiver-client/nginx.conf` is missing or the files did
+not make it into `dist/` — Vite copies `public/` verbatim, so they are unhashed
+and must be present under that exact name.
 
 **`network traefik_proxy declared as external, but could not be found`.** The
 Traefik stack hasn't been started on this server yet — it is what creates that
@@ -499,9 +575,11 @@ is not the account `/opt/psc-archiver` belongs to. Compare `ls -ld
 /opt/psc-archiver` with the `VPS_USER` secret; re-running `setup-app.sh` as
 the intended account prints the value it should be.
 
-**Certificate is not issued.** Traefik needs the `APP_HOST` DNS record to
-resolve to this server *before* it can complete the ACME challenge. Confirm with
-`dig +short <APP_HOST>`, then `docker logs traefik`.
+**Certificate is not issued.** Traefik needs the hostname's DNS record to
+resolve to this server *before* it can complete the ACME challenge, and each
+host is issued separately — so the admin can be fine while the learner is not.
+Confirm with `dig +short <ADMIN_HOST>` and `dig +short <LEARNER_HOST>`, then
+`docker logs traefik`.
 
 **Which build is live?** The version string is rendered in the app's sidebar
 footer. `GET /api/readyz` also returns the API's `buildId`.

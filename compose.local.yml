@@ -6,13 +6,19 @@
 # server.
 #
 #   Build from your working tree:   docker compose -f compose.local.yml up -d --build
-#   Run a published build:          API_TAG=<sha> WEB_TAG=<sha> \
+#   Run a published build:          API_TAG=<sha> WEB_TAG=<sha> LEARNER_TAG=<sha> \
 #                                     API_IMAGE=ghcr.io/mroshan74/psc-archiver-api \
 #                                     WEB_IMAGE=ghcr.io/mroshan74/psc-archiver-web \
+#                                     LEARNER_IMAGE=ghcr.io/mroshan74/psc-archiver-client \
 #                                     docker compose -f compose.local.yml pull && ... up -d --no-build
 #   First-run bootstrap:            docker compose -f compose.local.yml --profile seed run --rm seed
 #
-# Then open http://localhost:8080
+# Then open  http://localhost:8080  (admin)  and  http://localhost:8081 (learner)
+#
+# The learner container is the only place the client's /api proxy and its PDF
+# fonts get exercised before a server sees them — `pnpm dev` is cross-origin to
+# :5000 and loads fonts off the Vite dev server, so neither path is covered
+# there. Check both here after touching either app's nginx.conf.
 #
 # This stack deliberately uses its OWN MongoDB container. The predecessor
 # project's local compose pointed at the live Atlas cluster with full
@@ -25,7 +31,9 @@ x-api-env: &api-env
   JWT_SECRET: local-only-not-a-real-secret
   PORT: "5000"
   NODE_ENV: production
-  CLIENT_URL: http://localhost:8080
+  # Both frontends. Setting this REPLACES the API's fallback list rather than
+  # extending it, so every origin has to be named here.
+  CLIENT_URL: http://localhost:8080,http://localhost:8081
   BUILD_ID: ${BUILD_VERSION:-local}
   # Kept on locally — it is the quickest way to poke at the API by hand.
   SWAGGER_ENABLED: "true"
@@ -87,6 +95,24 @@ services:
     restart: unless-stopped
     ports:
       - "${WEB_PORT:-8080}:80"
+    depends_on:
+      - api
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  learner:
+    image: ${LEARNER_IMAGE:-psc-archiver-client}:${LEARNER_TAG:-local}
+    build:
+      context: ../psc-archiver-client
+      args:
+        BUILD_VERSION: ${BUILD_VERSION:-local}
+    restart: unless-stopped
+    ports:
+      - "${LEARNER_PORT:-8081}:80"
     depends_on:
       - api
     healthcheck:
