@@ -24,6 +24,18 @@ Fill these in — the checked-in files use placeholders.
 | `REPO_URL` | `scripts/setup-app.sh` | This repo's clone URL, if not `mroshan74/psc-archiver-deploy` |
 | `API_IMAGE` / `WEB_IMAGE` / `LEARNER_IMAGE` | `.env` | GHCR paths, if the owner is not `mroshan74` |
 | `MONGODB_URI`, `JWT_SECRET`, `OPENAI_API_KEY` | `.env` | Real credentials |
+| `MESSAGE_CENTRAL_CUSTOMER_ID`, `MESSAGE_CENTRAL_KEY` | `.env` | Learner sign-in by SMS. The **key is the account password base64-encoded**, not the password |
+
+> ⚠ **Leaving `OTP_PROVIDER` out disables learner sign-in.** The API's code
+> default is `console`, which sends no SMS at all, so the key is set to
+> `message_central` in `.env.example` rather than left blank. `console` also
+> returns the one-time code in the response body on any `NODE_ENV` other than
+> `production` — so on a server, that one variable is what stands between a
+> misconfiguration and handing out sessions. The two Message Central
+> credentials are validated in the sender's constructor: a missing one fails
+> the API's **boot**, which takes staff login down too. That is intended — a
+> misconfigured provider should not first surface as one learner's failed
+> sign-in.
 
 > ⚠ **`APP_HOST` was renamed to `ADMIN_HOST`** when the learner app arrived. A
 > server whose `.env` still has the old key stops on `deploy.sh`'s environment
@@ -404,6 +416,17 @@ entirely and only redeploys.
 
 `deploy.sh` prints the tag it replaced at the end of every run, so the value to
 roll back to is always in the previous deploy's log.
+
+### Rolling back learner sign-in
+
+`OTP_PROVIDER` looks like a switch you can flip back, and only one of its values
+is actually a rollback:
+
+| Value | As a rollback |
+|---|---|
+| revert the api image tag | ✅ The real one. Sign-in goes back to whatever the older build ran |
+| `msg91` | ✅ Only once DLT template registration lands, and only after adding `MSG91_AUTH_KEY` / `MSG91_TEMPLATE_ID` to both `.env` and `.env.example` |
+| `console` | ❌ **Not a rollback.** No SMS is sent, and the code is withheld from the response because `NODE_ENV=production`. That is not a degraded sign-in, it is no sign-in |
 
 ## Rotate a secret
 

@@ -41,6 +41,16 @@ x-api-env: &api-env
   AI_TAGGING_QUEUE_ENABLED: "false"
   AI_TAGGING_OPEN_FOLDER_ENABLED: "false"
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  # Consumer sign-in. Defaults to the console sender so this stack costs nothing
+  # to run, but note NODE_ENV=production above: the console sender withholds the
+  # code from the response, so signing in at :8081 means reading it out of
+  # `docker compose logs api`. To exercise real SMS, put OTP_PROVIDER and the
+  # three MESSAGE_CENTRAL_* values in a .env beside this file.
+  OTP_PROVIDER: ${OTP_PROVIDER:-console}
+  MESSAGE_CENTRAL_CUSTOMER_ID: ${MESSAGE_CENTRAL_CUSTOMER_ID:-}
+  # The account password, base64-encoded. The raw password is rejected.
+  MESSAGE_CENTRAL_KEY: ${MESSAGE_CENTRAL_KEY:-}
+  MESSAGE_CENTRAL_EMAIL: ${MESSAGE_CENTRAL_EMAIL:-}
   SEEDER_DATA_DIR: data
   SEED_SUPERADMIN_USERNAME: ${SEED_SUPERADMIN_USERNAME:-superadmin}
   SEED_SUPERADMIN_PASSWORD: ${SEED_SUPERADMIN_PASSWORD:-ChangeMe123!}
