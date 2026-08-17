@@ -52,7 +52,8 @@ Fill these in — the checked-in files use placeholders.
                         │     │                                           │
                         │     ├─▶ Host(ADMIN_HOST)                        │
                         │     │    web      nginx ── admin SPA            │
-                        │     │              └───── /api/* ──proxy─┐      │
+                        │     │              ├───── /api/* ──proxy─┐      │
+                        │     │              └───── /fonts/* (PDF faces)  │
                         │     │                                    │      │
                         │     └─▶ Host(LEARNER_HOST)               ├─▶ api│
                         │          learner  nginx ── learner SPA   │ :5000│
@@ -121,14 +122,16 @@ docker compose -f compose.local.yml --profile seed run --rm seed   # first run o
 Override the seeded account with `SEED_SUPERADMIN_USERNAME` /
 `SEED_SUPERADMIN_PASSWORD`, and the ports with `WEB_PORT` / `LEARNER_PORT`.
 
-> **This stack is the only place two things get tested before a server sees
-> them**, because `pnpm dev` exercises neither: each SPA's single-origin `/api`
-> proxy (dev is cross-origin to `:5000`), and the learner app's PDF fonts, which
+> **This stack is the only place three things get tested before a server sees
+> them**, because `pnpm dev` exercises none of them: each SPA's single-origin
+> `/api` proxy (dev is cross-origin to `:5000`); **both** apps' PDF fonts, which
 > are fetched over HTTP at render time from `/fonts/` — including
-> `Century Schoolbook Std Regular.otf`, spaces and all. If that one 404s, every
-> Malayalam export fails and there is no CDN fallback. After touching either
-> app's `nginx.conf`, download a paper here and watch the network tab for the
-> four font requests.
+> `Century Schoolbook Std Regular.otf`, spaces and all — where a 404 fails every
+> Malayalam export with no CDN fallback; and **whether the images build at all**,
+> since the Dockerfile deliberately sees a narrower file set than a developer
+> machine does. Run it with `--build` after touching either app's `nginx.conf`,
+> `Dockerfile`, or dependency manifests, then download a paper and watch the
+> network tab for the six font requests.
 
 The seed step is idempotent — re-running it creates nothing twice. Papers and
 questions are matched against the `_id` in the seed files, so a repeat run
@@ -546,21 +549,55 @@ docker compose -f compose.prod.yml -p psc-archiver exec -T learner \
   wget -q -O- http://127.0.0.1/api/readyz
 ```
 
-**Malayalam PDF exports fail on the learner app.** The exporter fetches four
-faces from `/fonts/` at render time and has no CDN fallback, so a 404 on any of
-them kills every export. The one that breaks is
-`Century Schoolbook Std Regular.otf` — spaces in the filename, requested
-`encodeURI`'d as `%20`. Check it directly:
+**Malayalam PDF exports fail.** Both SPAs fetch their faces from `/fonts/` at
+render time and neither has a CDN fallback, so a 404 on any of them kills every
+export. There are **six** files, and two carry spaces in the filename, requested
+`encodeURI`'d as `%20`. Check both tiers directly:
 
 ```bash
-docker compose -f compose.prod.yml -p psc-archiver exec -T learner \
-  wget -S -q -O /dev/null "http://127.0.0.1/fonts/Century%20Schoolbook%20Std%20Regular.otf"
+for svc in web learner; do
+  docker compose -f compose.prod.yml -p psc-archiver exec -T $svc \
+    wget -S -q -O /dev/null "http://127.0.0.1/fonts/Century%20Schoolbook%20Std%20Regular.otf"
+done
 ```
 
 Expect `200 OK` and `Content-Type: font/otf`. A 404 means the `location ^~
-/fonts/` block in `psc-archiver-client/nginx.conf` is missing or the files did
-not make it into `dist/` — Vite copies `public/` verbatim, so they are unhashed
-and must be present under that exact name.
+/fonts/` block in that app's `nginx.conf` is missing or the files did not make it
+into `dist/` — Vite copies `public/` verbatim, so they are unhashed and must be
+present under that exact name.
+
+> **Probe for a font that does not exist, too.** Until 2026-08-18 the admin image
+> had no `/fonts/` block at all, so a missing `.otf` face fell through to the SPA
+> catch-all and came back as **`index.html` with a 200**. react-pdf was handed a
+> few kilobytes of HTML and failed deep inside fontkit, pointing nowhere near the
+> cause. Both images now answer `404`:
+>
+> ```bash
+> docker compose -f compose.prod.yml -p psc-archiver exec -T web \
+>   wget -S -q -O /dev/null "http://127.0.0.1/fonts/no-such-face.otf"   # must be 404
+> ```
+>
+> Casing is load-bearing on the same probe: the Mandaram regular is `MANDARAM.ttf`
+> and its bold cut `Mandaram-Bold.ttf`. The container filesystem is case-sensitive
+> and developer machines are not, so a catalog string that drifts from the file
+> passes locally and 404s only here.
+
+**A frontend image fails to build with `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`.**
+Its `Dockerfile` is not copying `pnpm-workspace.yaml` and `patches/` into the
+install layer. Both SPAs patch `@react-pdf/layout` with a one-line inline-math
+fix; pnpm 10 declares that in `pnpm-workspace.yaml` and records it in the
+lockfile, so `pnpm install --frozen-lockfile` refuses to proceed without it. The
+install layer needs all four manifests:
+
+```dockerfile
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches ./patches
+```
+
+**Do not "fix" this by dropping `--frozen-lockfile`.** That installs the package
+unpatched, the build goes green, every export succeeds, and every fraction and
+subscript in every paper is silently misplaced by up to 4.49pt. Background:
+[psc-archiver-admin/docs/todos/frontend-image-build-patch-manifests.md](../psc-archiver-admin/docs/todos/frontend-image-build-patch-manifests.md).
 
 **`network traefik_proxy declared as external, but could not be found`.** The
 Traefik stack hasn't been started on this server yet — it is what creates that
