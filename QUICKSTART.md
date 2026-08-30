@@ -142,9 +142,88 @@ Then in a browser:
 
 ---
 
-## 5. Later deploys
+## 5. Pull the latest build and restart everything
 
-From here on CI does this on every push. By hand:
+**This is the loop to use until the git pipelines are wired up.** Every push to
+an app repo publishes `:latest` alongside its `:<short-sha>` tag, so pointing the
+stack at `latest` and pulling is enough to pick up whatever was last built.
+
+**One command does the whole thing:**
+
+```bash
+cd /opt/psc-archiver
+./scripts/deploy-latest.sh
+```
+
+Stop, pull, start, and prove both nginx tiers answer. Add `--seed` to run the
+step 3 bootstrap in the same pass, which is what you want after clearing the
+database:
+
+```bash
+./scripts/deploy-latest.sh --seed
+```
+
+| Flag | Does |
+|---|---|
+| *(none)* | `down`, `pull`, `up -d`, then probe `web` and `learner` |
+| `--seed` | also runs the seed profile once the api is answering |
+| `--no-down` | skip the stop; compose recreates only services whose image changed, so an unchanged frontend is not bounced |
+| `--tag <tag>` | use a pinned tag instead of `latest`, for all three services at once |
+| `--help` | the summary above |
+
+It refuses to touch anything if `.env` is missing a key that `.env.example` has,
+the same check `deploy.sh` runs, and it takes the **same lock** as `deploy.sh` so
+a refresh and a CI deploy cannot interleave.
+
+### The same thing by hand
+
+If you would rather not use the script, or want to see what it does:
+
+```bash
+cd /opt/psc-archiver
+
+# 1. point every service at the newest published image, and stamp a fresh
+#    BUILD_ID so old sessions are retired the way a real deploy retires them
+sed -i 's/^API_TAG=.*/API_TAG=latest/;s/^WEB_TAG=.*/WEB_TAG=latest/;s/^LEARNER_TAG=.*/LEARNER_TAG=latest/' .env
+sed -i "s/^BUILD_ID=.*/BUILD_ID=$(date +%y%m%d%H%M)-latest/" .env
+
+# 2. stop all app services
+docker compose -f compose.prod.yml -p psc-archiver down
+
+# 3. pull the newest images
+docker compose -f compose.prod.yml -p psc-archiver pull
+
+# 4. start everything again
+docker compose -f compose.prod.yml -p psc-archiver up -d
+```
+
+Step 1 only has to be run **once**; after that `.env` already says `latest` and
+the loop is just steps 2 to 4. Re-stamping `BUILD_ID` each time is what signs out
+sessions minted by the previous build, which a pinned-tag deploy gets for free.
+
+Once the stack is up, re-run the seed if the database was cleared:
+
+```bash
+docker compose -f compose.prod.yml -p psc-archiver --profile seed run --rm seed
+```
+
+> **Never add `-v` to that `down`.** It would delete the `ai_tagging_jobs`
+> volume, and OpenAI batch jobs run for minutes to 24 hours with their artefacts
+> on it. It is also **not** a way to reset data: the database is MongoDB Atlas,
+> which no compose command touches. Clear that in Atlas.
+
+> **`latest` is a testing convenience, not the deployment model.** While the tags
+> say `latest` you cannot roll back, because `rollback.sh` works by redeploying a
+> pinned tag and there is no record here of which build you are on. `docker
+> compose -f compose.prod.yml -p psc-archiver images` shows the image IDs you are
+> actually running. When the pipelines land, go back to pinned short-SHA tags,
+> which is what `deploy.sh` writes.
+
+---
+
+## 6. Once the git pipelines are wired up
+
+CI then does all of the above on every push, and by hand it becomes:
 
 ```bash
 cd /opt/psc-archiver
@@ -191,6 +270,8 @@ code is printed in `docker compose -f compose.local.yml logs api`.
 | Seed stops at `Login failed (401)` | `SEED_SUPERADMIN_USERNAME` / `SEED_SUPERADMIN_PASSWORD` in `.env` do not match the account already in the database |
 | `Refusing to import: N questions ... are not in the seed files` | The database is not empty and predates `_id` matching. Clear it and re-run step 3 |
 | `unauthorized` / `denied` pulling an image | No GHCR login on this account, or a fine-grained PAT instead of a classic one with `read:packages` |
+| `manifest unknown` pulling `:latest` | That repo's workflow has never completed a build, so no `:latest` exists yet. Push once, or set that one tag back to a short SHA that does exist |
+| A refresh pulled nothing and the app looks unchanged | `:latest` has not moved since the last pull. Confirm the build actually ran, then compare `docker compose -f compose.prod.yml -p psc-archiver images` before and after |
 | Certificate not issued | DNS does not resolve yet. `dig +short <ADMIN_HOST>`, then `docker logs traefik` |
 
 Longer list, with the reasoning: [README.md → Troubleshooting](README.md#troubleshooting).

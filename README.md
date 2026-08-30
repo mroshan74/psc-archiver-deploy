@@ -98,7 +98,8 @@ Consequences worth knowing:
 | `compose.local.yml` | Prod-parity local stack, with its own MongoDB |
 | `.env.example` | The key schema `deploy.sh` validates the server's `.env` against |
 | `scripts/setup-app.sh` | One-time application setup on an already-provisioned server. Checks its prerequisites; provisions nothing |
-| `scripts/deploy.sh` | What CI runs over SSH |
+| `scripts/deploy.sh` | What CI runs over SSH. One service, one pinned tag |
+| `scripts/deploy-latest.sh` | Stop, pull `:latest`, start all three, verify. The manual test-round loop until the pipelines are wired up |
 | `scripts/rollback.sh` | Redeploy an older tag |
 | `scripts/bootstrap.mjs` | First-run bootstrap, for **both** stacks (the `seed` compose profile in each). Seeds the System organization, the superadmin, the taxonomy, then the bundled papers and questions. Runs *inside* the `api` container — the host never needs Node.js, only Docker |
 | `docs/roadmaps/` | Planned work, one phase at a time. Current: [server-bootstrap-runbook.md](docs/roadmaps/server-bootstrap-runbook.md) |
@@ -405,6 +406,78 @@ Expect a few seconds of downtime while the container restarts. That is
 accepted: this pipeline optimises for fast, verified iteration rather than
 availability. Real zero-downtime needs two API replicas, which needs a
 distributed lock first (see *Known constraints*).
+
+### Refresh to the latest images by hand (no pipeline yet)
+
+Until the git pipelines are driving deploys, the fastest loop is to point the
+stack at `latest` and pull. All three workflows already publish `:latest`
+alongside the immutable `:<short-sha>` tag, so this picks up whatever was last
+built without anyone having to look a SHA up.
+
+```bash
+cd /opt/psc-archiver
+./scripts/deploy-latest.sh          # stop, pull, start, verify
+./scripts/deploy-latest.sh --seed   # ...and seed a freshly cleared database
+```
+
+| Flag | Does |
+|---|---|
+| *(none)* | `down`, `pull`, `up -d`, then probe `/api/readyz` through **both** nginx tiers |
+| `--seed` | also runs the `seed` profile once the api answers |
+| `--no-down` | skip the stop, so compose recreates only services whose image ID changed and an unchanged frontend is not bounced |
+| `--tag <tag>` | point all three services at a pinned tag instead of `latest` |
+
+It shares `deploy.sh`'s guarantees deliberately: the same `.env`-against-
+`.env.example` key check **before anything is touched**, the same `.deploy.lock`
+so a hand-run refresh and a CI deploy cannot interleave their `sed -i` on `.env`,
+and the same `git pull --ff-only` so the server runs committed config. What it
+does *not* share is the rollback trail — see the second warning below.
+
+Where it differs from `deploy.sh`, and why both exist:
+
+| | `deploy.sh` | `deploy-latest.sh` |
+|---|---|---|
+| Scope | one service | all three |
+| Tag | pinned short SHA | floating `latest` (or `--tag`) |
+| Restart | `up -d --no-deps <svc>` | full `down` then `up -d` |
+| Rollback trail | yes, `.env` records the tag | no, while the tag floats |
+| Runs from | CI, and by hand | by hand only |
+
+Doing it without the script, which is all the script does:
+
+```bash
+cd /opt/psc-archiver
+
+# once: point every service at the newest published image
+sed -i 's/^API_TAG=.*/API_TAG=latest/;s/^WEB_TAG=.*/WEB_TAG=latest/;s/^LEARNER_TAG=.*/LEARNER_TAG=latest/' .env
+
+# each refresh: stamp a fresh BUILD_ID, stop, pull, start
+sed -i "s/^BUILD_ID=.*/BUILD_ID=$(date +%y%m%d%H%M)-latest/" .env
+docker compose -f compose.prod.yml -p psc-archiver down
+docker compose -f compose.prod.yml -p psc-archiver pull
+docker compose -f compose.prod.yml -p psc-archiver up -d
+```
+
+**Re-stamping `BUILD_ID` is not cosmetic.** It is what retires sessions minted by
+the previous build ([0004](../psc-archiver-api/doc/decisions/0004-stateless-jwt-with-profile.md)),
+which `deploy.sh` gets for free by writing the image tag into it. A `latest` tag
+never changes, so without this line a tester keeps a token issued against the old
+build and the version reported by `GET /api/readyz` and in the admin sidebar goes
+stale.
+
+> ⚠ **Never add `-v` to that `down`.** It deletes the `ai_tagging_jobs` volume,
+> and OpenAI batch jobs run for minutes to 24 hours with their artefacts on it.
+> It is also **not** a way to reset the database: that is MongoDB Atlas, which no
+> compose command here touches.
+
+> ⚠ **`latest` trades away rollback.** `rollback.sh` works by redeploying a
+> pinned tag, and while `.env` says `latest` there is no record of which build is
+> live — `docker compose -f compose.prod.yml -p psc-archiver images` gives you the
+> image IDs and nothing more. This is a deliberate convenience for MVP test runs.
+> When the pipelines land, go back to pinned short-SHA tags, which is exactly what
+> `deploy.sh` writes and why `compose.prod.yml` says never `:latest`.
+
+Paste-ready version, with the seed step: [QUICKSTART.md](QUICKSTART.md#5-pull-the-latest-build-and-restart-everything).
 
 ### Container health
 

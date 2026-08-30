@@ -269,6 +269,10 @@ Steps 4, 6 and 7 are the ones you repeat every time the app is torn down and
 started again. They are collected, with their expected output, in
 $APP_DIR/QUICKSTART.md.
 
+Until the git pipelines are driving deploys, steps 6 and 7 collapse into one
+command that stops, pulls the newest images, starts everything and verifies it:
+    cd $APP_DIR && ./scripts/deploy-latest.sh --seed
+
 Lost this output? It's saved at $APP_DIR/REMAINING-STEPS.txt — cat it
 anytime, or just re-run this script; it's idempotent and safe to repeat.
 

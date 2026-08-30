@@ -238,6 +238,54 @@ Owner repos: `psc-archiver-admin`, `psc-archiver-client`.
 
 ---
 
+## Added after the phases — the manual refresh loop ✅
+
+Requested once the phases were done: a way to pull the newest build and restart
+without waiting for the git pipelines.
+
+- [x] **`scripts/deploy-latest.sh`** — the whole loop as one command, so a test
+      round is not four pasted steps. `down` / `pull` / `up -d`, then probes
+      `/api/readyz` through **both** nginx tiers. Flags: `--seed` (run the
+      bootstrap in the same pass), `--no-down` (let compose recreate only what
+      changed), `--tag <tag>` (pin instead of float), `--help`.
+      It reuses `deploy.sh`'s guarantees on purpose: the same `git pull --ff-only`
+      with the dirty-checkout guard, the same `.env`-against-`.env.example` key
+      check before anything is touched, and **the same `.deploy.lock`** — a
+      separate lock file would let a hand-run refresh and a CI deploy interleave
+      their `sed -i` on `.env`, which is the exact race that lock exists for.
+- [x] **`QUICKSTART.md` §5, "Pull the latest build and restart everything"** — the
+      script first, the by-hand form kept underneath. The old §5 became §6,
+      "Once the git pipelines are wired up".
+- [x] **`README.md` → "Refresh to the latest images by hand (no pipeline yet)"**,
+      under Deploy, with a table of how it differs from `deploy.sh` and why both
+      exist. Also the repository-layout row and a line in `setup-app.sh`'s printed
+      steps.
+
+Verified by dry-running the script against a stub `docker` on a throwaway copy of
+`.env.example`: the default path, `--tag`/`--no-down`/`--seed`, `--help`, an
+unknown argument, and a `.env` with two keys removed (which aborts with
+`Nothing was changed.` and leaves the file byte-identical). `bash -n` clean.
+
+Three things this rests on, all verified:
+
+1. **All three workflows already publish `:latest`** next to `:<short-sha>`
+   (`.github/workflows/deploy.yml` in each app repo, `tags:` block), so pointing
+   `.env` at `latest` needs no CI change.
+2. **The `sed` edits keep `.env` at 31 keys**, so `deploy.sh`'s key-for-key check
+   against `.env.example` still passes and a later real deploy is not blocked.
+   Tested against a copy of `.env.example`.
+3. **Re-stamping `BUILD_ID` is load-bearing, not cosmetic.** A `latest` tag never
+   changes, so without it sessions minted against the previous build survive a
+   refresh ([0004](../../../psc-archiver-api/doc/decisions/0004-stateless-jwt-with-profile.md))
+   and the build reported by `readyz` and the admin sidebar goes stale. `deploy.sh`
+   gets this for free by writing the image tag into `BUILD_ID`.
+
+**The trade-off is stated in both places:** while the tags say `latest` there is no
+rollback, because `rollback.sh` redeploys a pinned tag and nothing records which
+build is live. That is acceptable for MVP test runs and must be reverted to pinned
+short-SHA tags when the pipelines land, which is what `compose.prod.yml`'s "never
+`:latest`" comment is about.
+
 ## Risks and non-goals
 
 - **Main risk: the seed container's network.** In `compose.local.yml` everything
