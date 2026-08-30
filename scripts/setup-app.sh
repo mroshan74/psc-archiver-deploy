@@ -5,7 +5,7 @@
 # script; it only runs deploy.sh, which exists on the box because this ran.
 #
 #   ssh <account>@<vps>
-#   curl -fsSL https://raw.githubusercontent.com/<owner>/psc-archiver-deploy/master/scripts/setup-app.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/<owner>/psc-archiver-deploy/main/scripts/setup-app.sh | bash
 #
 # or clone the repo first and run it locally. Safe to re-run.
 #
@@ -257,9 +257,17 @@ $GHCR_STEP
        ./scripts/deploy.sh web <tag>       # staff back office
        ./scripts/deploy.sh learner <tag>   # learner-facing app
 
-  7. Create the first admin account (only once, on an empty database):
-       docker compose -f compose.prod.yml -p psc-archiver run --rm \\
-         api node dist/scripts/seed-superadmin.js
+  7. Seed the database — one command, on an empty database. It creates the
+     System organization and the superadmin, waits for the api, then seeds the
+     taxonomy and imports the bundled exam papers and questions. It runs inside
+     the api image and talks to api:5000 over the internal network, so you never
+     sign in or call the API yourself. Idempotent, safe to re-run:
+       docker compose -f compose.prod.yml -p psc-archiver --profile seed run --rm seed
+     Set SEED_SUPERADMIN_USERNAME and SEED_SUPERADMIN_PASSWORD in .env first.
+
+Steps 4, 6 and 7 are the ones you repeat every time the app is torn down and
+started again. They are collected, with their expected output, in
+$APP_DIR/QUICKSTART.md.
 
 Lost this output? It's saved at $APP_DIR/REMAINING-STEPS.txt — cat it
 anytime, or just re-run this script; it's idempotent and safe to repeat.

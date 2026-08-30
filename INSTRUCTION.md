@@ -97,7 +97,7 @@ Once the above holds, the server is ready for the one-time application setup.
 Run it **as the account CI will connect as**:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mroshan74/psc-archiver-deploy/master/scripts/setup-app.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mroshan74/psc-archiver-deploy/main/scripts/setup-app.sh | bash
 ```
 
 It checks its prerequisites, clones this repo to `/opt/psc-archiver`, creates
@@ -105,3 +105,12 @@ It checks its prerequisites, clones this repo to `/opt/psc-archiver`, creates
 `/opt/psc-archiver/REMAINING-STEPS.txt`). Safe to re-run.
 
 Full details: [README.md → Set up the application](README.md#set-up-the-application).
+
+---
+
+## 5. Bring the app up
+
+Everything above happens **once per box**. Bringing the application up — Traefik,
+the app stack, then the one-command seed — happens on every fresh MVP round, and
+lives in its own file: **[QUICKSTART.md](QUICKSTART.md)**, commands only, in paste
+order.

@@ -132,16 +132,18 @@ services:
       retries: 3
       start_period: 5s
 
-  # One-shot bootstrap. Idempotent — safe to re-run.
+  # One-shot bootstrap: System organization + superadmin, taxonomy, then the
+  # bundled papers and questions. Idempotent, safe to re-run.
   seed:
     profiles: [seed]
     image: ${API_IMAGE:-psc-archiver-api}:${API_TAG:-local}
     environment:
       <<: *api-env
       API_BASE_URL: http://api:5000
+      ADMIN_URL: http://localhost:${WEB_PORT:-8080}
     volumes:
-      - ./scripts/seed-local.mjs:/seed-local.mjs:ro
-    command: ["node", "/seed-local.mjs"]
+      - ./scripts/bootstrap.mjs:/bootstrap.mjs:ro
+    command: ["node", "/bootstrap.mjs"]
     depends_on:
       mongo:
         condition: service_healthy

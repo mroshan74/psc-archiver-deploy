@@ -11,3 +11,8 @@
 
 # Parsed by docker compose on the server.
 *.yml text eol=lf
+
+# Bind-mounted into the api container and run by node there. Node itself copes
+# with CRLF, but this file is pinned alongside the rest of what ships to a
+# Linux box so the whole scripts/ directory has one answer.
+*.mjs text eol=lf

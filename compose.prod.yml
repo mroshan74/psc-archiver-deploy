@@ -114,6 +114,45 @@ services:
       - "traefik.http.routers.learner.tls.certresolver=letsencrypt"
       - "traefik.http.services.learner.loadbalancer.server.port=80"
 
+  # One-shot bootstrap for a fresh database, the production twin of the `seed`
+  # service in compose.local.yml. Run it after the stack is up:
+  #
+  #   docker compose -f compose.prod.yml -p psc-archiver --profile seed run --rm seed
+  #
+  # It creates the System organization and the superadmin (straight to MongoDB),
+  # waits for the api, then seeds the taxonomy and imports the bundled exam
+  # papers and questions over the internal network. Nobody has to sign in or
+  # call the API by hand. Idempotent, so it is safe to re-run.
+  #
+  # It does NOT clear anything. Starting a fresh MVP round means emptying the
+  # Atlas database yourself first; there is no mongo container here to wipe.
+  seed:
+    profiles: [seed]
+    # The same image the api service resolves, so the bootstrap always matches
+    # the build that is actually deployed.
+    image: ${API_IMAGE:-ghcr.io/mroshan74/psc-archiver-api}:${API_TAG:?API_TAG is not set in .env}
+    # Supplies MONGODB_URI, SEED_SUPERADMIN_*, SEEDER_DATA_DIR — the same file
+    # the api container runs on, so the two can never disagree about the database.
+    env_file:
+      - .env
+    environment:
+      API_BASE_URL: http://api:5000
+      ADMIN_URL: https://${ADMIN_HOST:?ADMIN_HOST is not set in .env}
+    volumes:
+      - ./scripts/bootstrap.mjs:/bootstrap.mjs:ro
+    command: ["node", "/bootstrap.mjs"]
+    depends_on:
+      - api
+    # Load-bearing. This file has no default network, only the external
+    # traefik_proxy the api sits on. Without this the container starts, fails to
+    # resolve `api`, and times out 90s later with a message that looks like an
+    # API fault rather than a networking one.
+    networks:
+      - traefik_proxy
+    labels:
+      # A one-shot container must never be routed.
+      - "traefik.enable=false"
+
 volumes:
   ai_tagging_jobs:
     name: psc-archiver-ai-tagging-jobs

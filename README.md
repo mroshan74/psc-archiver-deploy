@@ -9,6 +9,10 @@ projects it was buried inside an application repo, and in both cases the copy
 on the server silently drifted from the copy in git. Here, `deploy.sh` pulls
 this repo on every deploy, so the server can only run what is committed.
 
+> **Standing a torn-down server back up?** You want
+> **[QUICKSTART.md](QUICKSTART.md)** — the same path as below, as commands to
+> paste in order, with nothing to read. This file is the reference behind it.
+
 ---
 
 ## Before your first deploy
@@ -87,14 +91,17 @@ Consequences worth knowing:
 
 | File | Purpose |
 |---|---|
-| `compose.prod.yml` | The production stack (`api` + `web` + `learner`) |
+| `QUICKSTART.md` | Bring a torn-down server back up. Commands only, in paste order |
+| `INSTRUCTION.md` | How the box itself was provisioned, before this repo ever reached it |
+| `compose.prod.yml` | The production stack (`api` + `web` + `learner`, plus the `seed` profile) |
 | `compose.traefik.yml` | Edge proxy and TLS. Brought up once, then left alone |
 | `compose.local.yml` | Prod-parity local stack, with its own MongoDB |
 | `.env.example` | The key schema `deploy.sh` validates the server's `.env` against |
 | `scripts/setup-app.sh` | One-time application setup on an already-provisioned server. Checks its prerequisites; provisions nothing |
 | `scripts/deploy.sh` | What CI runs over SSH |
 | `scripts/rollback.sh` | Redeploy an older tag |
-| `scripts/seed-local.mjs` | First-run bootstrap for the local stack. Runs *inside* the `api` container (via the `seed` compose profile) — the host never needs Node.js, only Docker |
+| `scripts/bootstrap.mjs` | First-run bootstrap, for **both** stacks (the `seed` compose profile in each). Seeds the System organization, the superadmin, the taxonomy, then the bundled papers and questions. Runs *inside* the `api` container — the host never needs Node.js, only Docker |
+| `docs/roadmaps/` | Planned work, one phase at a time. Current: [server-bootstrap-runbook.md](docs/roadmaps/server-bootstrap-runbook.md) |
 
 ---
 
@@ -180,9 +187,20 @@ whatever the file says. The seeder never deletes anything — questions on a
 seeded paper that the files no longer list are counted under `not in the files`
 and left alone.
 
-It runs `scripts/seed-local.mjs` *inside* the `api` image's own Node (via the
+It runs `scripts/bootstrap.mjs` *inside* the `api` image's own Node (via the
 `seed` profile above) — the host you run these commands on never needs Node.js
-installed, only Docker.
+installed, only Docker. The **same script and the same profile exist in
+`compose.prod.yml`**, so a server is seeded by the command this section
+rehearses, not by a different one.
+
+**Taxonomy is the one part that is not idempotent by itself, so the script
+guards it.** `POST /api/taxonomy/seed` mints a *new* version on every call and
+activates it, which on a re-run would leave you with v1, v2, v3… The script
+therefore reads `GET /api/taxonomy/versions` first and seeds only into an empty
+list, reporting `Taxonomy already seeded: N version(s), active vN. Skipped.`
+otherwise. `SEED_TAXONOMY_FORCE=1` adds one deliberately — which is what you
+want after editing `src/taxonomy/data/taxonomy-seed.json` in the API, since a
+taxonomy change ships as a new version rather than an edit to the old one.
 
 To run an exact published build instead of your working tree:
 
@@ -237,7 +255,7 @@ which is on the server because this put it there.
 
 ```bash
 ssh <account>@<vps>
-curl -fsSL https://raw.githubusercontent.com/mroshan74/psc-archiver-deploy/master/scripts/setup-app.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mroshan74/psc-archiver-deploy/main/scripts/setup-app.sh | bash
 ```
 
 **Whichever account you SSH in as is the account CI must use.** The script
@@ -315,7 +333,9 @@ owns the shared `traefik_proxy` network; `compose.prod.yml` joins it as
 
 **Normally you do nothing.** Push to the default branch in any of the three app
 repos and CI builds, publishes to GHCR, and runs `deploy.sh` over SSH. Note the
-branch differs: `master` for the api and admin, **`main`** for the client.
+branch differs: `master` for the api and admin, **`main`** for the client. (This
+infrastructure repo is on `main` too, which is what `deploy.sh`'s `git pull` and
+the `setup-app.sh` bootstrap URL both track.)
 
 | Repo | Service | Image |
 |---|---|---|
@@ -445,34 +465,67 @@ Rotating `JWT_SECRET` signs everyone out, which is the intended effect.
 ## Bootstrap a fresh database
 
 The app has never been in production, so there is no migration path — a fresh
-database is seeded from scratch.
+database is seeded from scratch. **One command does all of it**, and it is the
+same script and the same profile the local stack uses:
 
 ```bash
 cd /opt/psc-archiver
+docker compose -f compose.prod.yml -p psc-archiver --profile seed run --rm seed
+```
+
+Four steps, in this order, because each depends on the one before:
+
+| # | Step | How |
+|---|---|---|
+| 1 | The **System organization** at fixed `_id` `6a71ad994b228f7bf76fb570`, then the **superadmin** at fixed `_id` `6a71ad994b228f7bf76fb569` | `dist/scripts/seed-superadmin.js`, straight to MongoDB. The API does not need to be up |
+| 2 | Wait for `GET /api/readyz` | polled over the internal network |
+| 3 | **Taxonomy**, if the database has none | `POST /api/taxonomy/seed` |
+| 4 | **163 exam papers and 14,868 questions** | `POST /api/seeder/import`, check first, then write |
+
+**Steps 3 and 4 go over the compose network to `api:5000`, so nobody signs in or
+calls the API by hand.** That is the whole point of the profile: the previous
+procedure was to obtain a token and POST the seeder yourself, and it was easy to
+do against the wrong host.
+
+**The organization comes first and that ordering is load-bearing.** Since the
+multi-tenant work, every staff role requires an organization, so a superadmin
+created before one exists fails schema validation. The script writes both, and
+the ids are fixed so re-seeding, export and import never change or unlink them.
+If a superadmin already exists under a *different* `_id`, it warns and exits
+rather than creating a second account — check the output, not just the exit code.
+
+Everything is **safe to re-run**, and re-running is how you pick up a correction
+to the seed data rather than a first-run-only step. On a second run every line
+reports a skip or a zero.
+
+**What is not idempotent, and how it is handled:**
+
+- **Taxonomy.** `POST /api/taxonomy/seed` mints a new version on every call and
+  activates it. The script reads `GET /api/taxonomy/versions` first and seeds
+  only into an empty list. `SEED_TAXONOMY_FORCE=1` adds one deliberately, which
+  is what you want after the API's bundled `taxonomy-seed.json` changes.
+- **Content, on a database that predates `_id` matching.** `dryRun` runs first
+  and the script refuses the write when `questionsUnmatchedCount` is non-zero,
+  because importing would insert a second copy of every question. `SEED_FORCE=1`
+  overrides, and on a production database a non-zero count is a reason to stop
+  and look rather than to force.
+
+The content run is also validated up front: a bad or duplicated `_id` in the seed
+files, or a paper code belonging to a different paper than the file's `_id` does,
+rejects the whole request with the list of problems and **nothing is written**.
+
+**This command clears nothing.** Production runs on MongoDB Atlas, so there is no
+container to wipe and `down -v` does not touch it. Starting a fresh MVP round
+means emptying the database in Atlas yourself first; nothing in this repo deletes
+data.
+
+The individual steps are still available if you need one on its own — for
+example, repairing a superadmin whose organization link is wrong:
+
+```bash
 docker compose -f compose.prod.yml -p psc-archiver run --rm \
   api node dist/scripts/seed-superadmin.js
 ```
-
-Idempotent by `_id`: the bootstrap account is always created with the fixed
-ObjectId `6a71ad994b228f7bf76fb569`, so re-seeding, export and import never
-change or unlink it. The script does nothing if that `_id` is already present,
-and if a superadmin exists under a *different* `_id` it warns and exits rather
-than creating a second account.
-
-Content (exam papers and questions) is then imported by signing in and calling
-`POST /api/seeder/import` — `scripts/seed-local.mjs` shows the exact sequence.
-That import is idempotent too, and safe to re-run to apply seed-data
-corrections: papers and questions are upserted against the `_id` in the seed
-files, existing rows are updated in place, and deleted rows are restored.
-
-**`dryRun` defaults to `true`**, so a request that omits the field performs a
-check and writes nothing. Always run the check first and read
-`questionsUnmatchedCount` before sending `{ "dryRun": false }` — a non-zero value
-means the database holds questions the seed files do not account for, which on a
-production database is a reason to stop and look, not to import. The whole run
-is also validated up front: if the seed files have a bad or duplicated `_id`, or
-a paper code that belongs to a different paper than the file's `_id` does, the
-request is rejected with the list of problems and **nothing is written**.
 
 ---
 
@@ -604,6 +657,25 @@ Traefik stack hasn't been started on this server yet — it is what creates that
 network. Bring it up first
 (`ACME_EMAIL=… docker compose -f compose.traefik.yml -p traefik up -d`), then
 retry the app stack.
+
+**The seed run stops at `API did not become ready within 90s`.** Two causes, in
+the order worth checking:
+
+1. **The seed container is not on the api's network.** `compose.prod.yml` has no
+   default network of its own — only the external `traefik_proxy` — so the `seed`
+   service carries an explicit `networks: [traefik_proxy]`. Without it the
+   container starts perfectly well, cannot resolve the name `api`, and fails 90
+   seconds later with a message that reads like an API fault. Confirm with
+   `docker compose -f compose.prod.yml -p psc-archiver --profile seed config`
+   and look for `traefik_proxy` under the `seed` service.
+2. **The api genuinely is not ready.** `docker compose -f compose.prod.yml -p
+   psc-archiver ps` should show it `(healthy)`; if not, read
+   `logs api` — a missing `MONGODB_URI` or `JWT_SECRET` is the usual answer.
+
+A `Login failed (401)` immediately after is a different problem: the
+`SEED_SUPERADMIN_USERNAME` / `SEED_SUPERADMIN_PASSWORD` in `.env` do not match the
+account already in the database. The seeded account is pinned to a fixed `_id`,
+so once it exists these two values no longer create it, they only sign in as it.
 
 **`Local changes present in /opt/psc-archiver — skipping git pull` on every
 deploy, with `git status` showing nothing you edited.** Run `git diff` on the
