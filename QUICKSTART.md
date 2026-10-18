@@ -140,6 +140,15 @@ Then in a browser:
 - `https://<ADMIN_HOST>` — sign in as the seeded superadmin, set a new password when prompted, confirm the taxonomy page shows subjects and the exam papers list shows 163.
 - `https://<LEARNER_HOST>` — sign in by mobile number, open a paper, download it, and confirm the Malayalam renders.
 
+### Paper lifecycle audit (once, when the decision 0040 build first goes out)
+
+Read-only report of published papers with no questions and stale question counts, run inside the api container so it uses that container's `MONGODB_URI`. Exit `0` means clean. `--apply` moves empty published papers back to draft and refreshes the counts. Details: `psc-archiver-api/src/scripts/audit-paper-lifecycle.ts`.
+
+```bash
+docker compose -f compose.prod.yml -p psc-archiver exec -T api node dist/scripts/audit-paper-lifecycle.js
+docker compose -f compose.prod.yml -p psc-archiver exec -T api node dist/scripts/audit-paper-lifecycle.js --apply
+```
+
 ---
 
 ## 5. Pull the latest build and restart everything
