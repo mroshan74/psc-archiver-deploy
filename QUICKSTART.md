@@ -149,6 +149,15 @@ docker compose -f compose.prod.yml -p psc-archiver exec -T api node dist/scripts
 docker compose -f compose.prod.yml -p psc-archiver exec -T api node dist/scripts/audit-paper-lifecycle.js --apply
 ```
 
+### Question bank backfill (once, when the decision 0042 build first goes out, and required)
+
+Every question needs a `bank` (`pyq` or `external`) before the admin app can list it: each Question Bank page now asks for one bank, and a row from before the field matches neither, so an unbackfilled database shows **empty** Questions, My Questions and Review pages. Run it right after the new api image is up, inside the api container so it uses that container's `MONGODB_URI`. The first form only reports; `--apply` writes. It is safe to re-run, and rows the new build creates are stamped on write. Details: `psc-archiver-api/src/scripts/backfill-question-banks.ts`.
+
+```bash
+docker compose -f compose.prod.yml -p psc-archiver exec -T api node dist/scripts/backfill-question-banks.js
+docker compose -f compose.prod.yml -p psc-archiver exec -T api node dist/scripts/backfill-question-banks.js --apply
+```
+
 ---
 
 ## 5. Pull the latest build and restart everything
