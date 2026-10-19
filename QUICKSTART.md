@@ -158,6 +158,18 @@ docker compose -f compose.prod.yml -p psc-archiver exec -T api node dist/scripts
 docker compose -f compose.prod.yml -p psc-archiver exec -T api node dist/scripts/backfill-question-banks.js --apply
 ```
 
+### Question source type migration (once, before the decision 0045 build serves traffic, and required)
+
+The decision 0045 build accepts only three source types (`exam_paper`, `current_affairs`, `custom`). A question still carrying a retired one (`textbook`, `manual`, `editorial`, `user`) fails validation on its next save, and a learner export containing it fails. The script rewrites those to `custom`, deleted rows included.
+
+Run it **from the new image before restarting the api**: pull, run it in a one-off container (the running api keeps serving, and it already accepts `custom`), then restart as in §5. The first form only reports; `--apply` writes. It is safe to re-run. Details: `psc-archiver-api/src/scripts/migrate-question-source-types.ts`.
+
+```bash
+docker compose -f compose.prod.yml -p psc-archiver pull api
+docker compose -f compose.prod.yml -p psc-archiver run --rm --no-deps api node dist/scripts/migrate-question-source-types.js
+docker compose -f compose.prod.yml -p psc-archiver run --rm --no-deps api node dist/scripts/migrate-question-source-types.js --apply
+```
+
 ---
 
 ## 5. Pull the latest build and restart everything
