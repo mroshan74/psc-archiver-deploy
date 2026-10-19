@@ -170,6 +170,17 @@ docker compose -f compose.prod.yml -p psc-archiver run --rm --no-deps api node d
 docker compose -f compose.prod.yml -p psc-archiver run --rm --no-deps api node dist/scripts/migrate-question-source-types.js --apply
 ```
 
+### Classification level index (once, when the decision 0046 build first goes out)
+
+The decision 0046 build stops writing `classification.examLevels` (a question's level is its paper's) and no longer declares its index. Mongoose never drops an index on its own, so an existing database keeps a dead index until this runs. The first form reports the index and how many rows still carry the field; `--apply` drops the index and leaves the rows alone. Run it inside the api container so it uses that container's `MONGODB_URI`. Safe to re-run. Details: `psc-archiver-api/src/scripts/migrate-classification-levels.ts`.
+
+```bash
+docker compose -f compose.prod.yml -p psc-archiver exec -T api node dist/scripts/migrate-classification-levels.js
+docker compose -f compose.prod.yml -p psc-archiver exec -T api node dist/scripts/migrate-classification-levels.js --apply
+```
+
+The same build adds `7th_level` and re-levels thirteen Last Grade Servants papers in the seed file, so re-run the seed step from §3 (it is idempotent) after the api is up. Then deploy the learner app and the admin app, in that order: both pin `examLevels` in their drift checks.
+
 ---
 
 ## 5. Pull the latest build and restart everything
