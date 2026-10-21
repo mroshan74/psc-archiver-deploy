@@ -86,7 +86,15 @@ Expect, on an empty database:
 ```
 
 Run it again and every line reports a skip or a zero. That is the expected
-outcome, not a failure.
+outcome, not a failure. **Exception:** once reviewers have changed question
+classifications in the admin app, a re-run puts the seed's classifications back
+over theirs (`changed` is no longer zero). Do not re-run it on a database where
+classification review has started.
+
+If the content step fails with `Seed classifications were rejected before any
+writes: Activate the matching bundled taxonomy...`, the database already has an
+older taxonomy. Run it once with `SEED_TAXONOMY_FORCE=1` (below). Nothing was
+written by the failed run.
 
 ### The two overrides
 
@@ -94,6 +102,7 @@ Both are one-off, passed inline. Neither belongs in `.env`.
 
 ```bash
 # add a taxonomy version even though the database already has one
+# (also the fix for "Activate the matching bundled taxonomy")
 docker compose -f compose.prod.yml -p psc-archiver --profile seed \
   run --rm -e SEED_TAXONOMY_FORCE=1 seed
 

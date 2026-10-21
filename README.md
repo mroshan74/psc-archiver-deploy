@@ -141,7 +141,8 @@ Override the seeded account with `SEED_SUPERADMIN_USERNAME` /
 > `Dockerfile`, or dependency manifests, then download a paper and watch the
 > network tab for the six font requests.
 
-The seed step is idempotent — re-running it creates nothing twice. Papers and
+The seed step is idempotent — re-running it creates nothing twice (classifications
+are the exception, see the taxonomy note below). Papers and
 questions are matched against the `_id` in the seed files, so a repeat run
 **updates** the rows that are already there instead of skipping or duplicating
 them. That makes re-running the `seed` profile the way to pick up a correction
@@ -202,6 +203,33 @@ list, reporting `Taxonomy already seeded: N version(s), active vN. Skipped.`
 otherwise. `SEED_TAXONOMY_FORCE=1` adds one deliberately — which is what you
 want after editing `src/taxonomy/data/taxonomy-seed.json` in the API, since a
 taxonomy change ships as a new version rather than an edit to the old one.
+
+> ⚠ **The question seed is classified, and the classifications are locked to
+> one taxonomy revision** (API commit `36b2fd3`, 21 October 2026). Every
+> question in `pscdatabuilder.questions.json` now carries an AI classification
+> made against the bundled taxonomy `2026-10-21-review-4`, pinned by
+> `pscdatabuilder.classification-manifest.json`. Three things follow:
+>
+> - **A fresh database seeds cleanly.** Drop the *whole* database (taxonomy
+>   included) and the script seeds review-4 first, then the content passes. No
+>   OpenAI spend is involved; the classifications come from the committed file.
+> - **An existing database with an older taxonomy refuses the content step**
+>   with `Seed classifications were rejected before any writes: Activate the
+>   matching bundled taxonomy before importing classified questions`. Nothing is
+>   written. Dropping only `questions` and `exampapers` (the reset above) does
+>   not help, because the old taxonomy survives. Re-run once with
+>   `SEED_TAXONOMY_FORCE=1` to add and activate the bundled revision.
+> - **A re-run overwrites classification reviews.** Papers and question content
+>   stay idempotent, but every question's classification is replaced with the
+>   seed's, including decisions a reviewer made in the admin app. Once reviews
+>   have started on a database, do not re-run the seed against it.
+>
+> While this MVP lock holds, **do not edit `taxonomy-seed.json` or the question
+> seed** in the API: either edit makes every import refuse until the classifier
+> is re-run, which costs about USD 50. The paragraph above about editing
+> `taxonomy-seed.json` is suspended until then. Details, the exit plan and the
+> image-size options:
+> [psc-archiver-api/doc/taxonomy/local-seed-classification.md](../psc-archiver-api/doc/taxonomy/local-seed-classification.md).
 
 To run an exact published build instead of your working tree:
 
