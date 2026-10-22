@@ -39,7 +39,6 @@ x-api-env: &api-env
   SWAGGER_ENABLED: "true"
   # Off by default so a demo stack never spends OpenAI credits.
   AI_TAGGING_QUEUE_ENABLED: "false"
-  AI_TAGGING_OPEN_FOLDER_ENABLED: "false"
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
   # Consumer sign-in. Defaults to the console sender so this stack costs nothing
   # to run, but note NODE_ENV=production above: the console sender withholds the
