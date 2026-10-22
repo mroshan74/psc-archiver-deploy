@@ -96,6 +96,11 @@ writes: Activate the matching bundled taxonomy...`, the database already has an
 older taxonomy. Run it once with `SEED_TAXONOMY_FORCE=1` (below). Nothing was
 written by the failed run.
 
+If it fails with `The seed files changed after the classification manifest was
+written (...)` or `The classification manifest predates the exam paper lock`,
+the image carries seed files whose manifest was not re-hashed. That is fixed in
+the API repo, not on the server: re-hash locally, commit, rebuild and deploy.
+
 ### The two overrides
 
 Both are one-off, passed inline. Neither belongs in `.env`.

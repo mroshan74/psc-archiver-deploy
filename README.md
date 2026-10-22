@@ -224,11 +224,17 @@ taxonomy change ships as a new version rather than an edit to the old one.
 >   seed's, including decisions a reviewer made in the admin app. Once reviews
 >   have started on a database, do not re-run the seed against it.
 >
-> While this MVP lock holds, **do not edit `taxonomy-seed.json` or the question
-> seed** in the API: either edit makes every import refuse until the classifier
-> is re-run, which costs about USD 50. The paragraph above about editing
-> `taxonomy-seed.json` is suspended until then. Details, the exit plan and the
-> image-size options:
+> The lock covers the question seed, `exam-papers.bulk.v2.json` and
+> `taxonomy-seed.json` (manifest version 2, API decision 0051). An edit to any
+> of them makes every import refuse with `The seed files changed after the
+> classification manifest was written (...)` until the manifest is re-hashed.
+> **Re-hash in a local API checkout, never on a server** (writes are off there),
+> with `POST /api/seeder/manifest/rehash`, and commit the manifest with the
+> edit. That is free for fields the classifier never saw; an edit it did see
+> must be accepted explicitly or re-classified, which costs about USD 50. A
+> taxonomy edit that changes labels, scope, tags, rules or the revision still
+> needs `SEED_TAXONOMY_FORCE=1` on an existing database, as the paragraph above
+> describes. Details, the exit plan and the image-size options:
 > [psc-archiver-api/doc/taxonomy/local-seed-classification.md](../psc-archiver-api/doc/taxonomy/local-seed-classification.md).
 
 To run an exact published build instead of your working tree:
